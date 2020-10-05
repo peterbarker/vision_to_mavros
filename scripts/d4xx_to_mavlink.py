@@ -592,6 +592,8 @@ def get_local_ip():
 ##  Main code starts here                           ##
 ######################################################
 
+progress("INFO: pyrealsense2 version: %s" % str(rs.__version__))
+
 progress("INFO: Starting MAVLink connection")
 conn = mavutil.mavlink_connection(
     connection_string,
