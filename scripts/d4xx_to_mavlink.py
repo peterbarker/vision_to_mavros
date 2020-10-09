@@ -79,7 +79,7 @@ obstacle_line_thickness_pixel = 10 # [1-DEPTH_HEIGHT]: Number of pixel rows to u
 USE_PRESET_FILE = True
 PRESET_FILE  = "../cfg/d4xx-default.json"
 
-RTSP_STREAMING_ENABLE = True
+RTSP_STREAMING_ENABLE = False
 RTSP_PORT = "8554"
 RTSP_MOUNT_POINT = "/d4xx"
 
