@@ -31,7 +31,6 @@ os.environ["MAVLINK20"] = "1"
 # Import the libraries
 import pyrealsense2 as rs
 import numpy as np
-import transformations as tf
 import math as m
 import signal
 import sys
@@ -74,13 +73,13 @@ COLOR_HEIGHT = 480
 FPS          = 30
 DEPTH_RANGE_M = [0.1, 8.0]       # Replace with your sensor's specifics, in meter
 
-obstacle_line_height_ratio = 0.25  # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
+obstacle_line_height_ratio = 0.18  # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
 obstacle_line_thickness_pixel = 10 # [1-DEPTH_HEIGHT]: Number of pixel rows to use to generate the obstacle distance message. For each column, the scan will return the minimum value for those pixels centered vertically in the image.
 
 USE_PRESET_FILE = True
 PRESET_FILE  = "../cfg/d4xx-default.json"
 
-RTSP_STREAMING_ENABLE = True
+RTSP_STREAMING_ENABLE = False
 RTSP_PORT = "8554"
 RTSP_MOUNT_POINT = "/d4xx"
 
@@ -589,8 +588,6 @@ def get_local_ip():
 ##  Main code starts here                           ##
 ######################################################
 
-progress("INFO: pyrealsense2 version: %s" % str(rs.__version__))
-
 progress("INFO: Starting MAVLink connection")
 conn = mavutil.mavlink_connection(
     connection_string,
@@ -689,13 +686,13 @@ try:
             # Prepare the data
             input_image = np.asanyarray(colorizer.colorize(depth_frame).get_data())
             output_image = np.asanyarray(colorizer.colorize(filtered_frame).get_data())
-            display_image = np.hstack((input_image, cv2.resize(output_image, (DEPTH_WIDTH, DEPTH_HEIGHT))))
-
-            # Draw a horizontal line to visualize the obstacles' line
-            x1, y1 = int(DEPTH_WIDTH + obstacle_line_thickness_pixel / 2), int(obstacle_line_height)
-            x2, y2 = int(DEPTH_WIDTH * 2), int(obstacle_line_height)
+            
+            x1, y1 = int(0), int(obstacle_line_height)
+            x2, y2 = int(DEPTH_WIDTH), int(obstacle_line_height)
             line_thickness = obstacle_line_thickness_pixel
-            cv2.line(display_image, (x1, y1), (x2, y2), (0, 255, 0), thickness=line_thickness)
+            cv2.line(output_image, (x1, y1), (x2, y2), (0, 255, 0), thickness=line_thickness)
+
+            display_image = np.hstack((input_image, cv2.resize(output_image, (DEPTH_WIDTH, DEPTH_HEIGHT))))
 
             # Put the fps in the corner of the image
             processing_speed = 1 / (time.time() - last_time)
@@ -715,7 +712,7 @@ try:
             cv2.waitKey(1)
 
             # Print all the distances in a line
-            # progress(*distances)
+            progress("%s" % (str(distances)))
             
             last_time = time.time()
 
