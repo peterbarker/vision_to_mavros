@@ -63,14 +63,29 @@ class D4XXToMAVLink(object):
     '''Sources data from an Intel RealSense D4xx series camera and sends
     mavlink messages based on that'''
 
+    class StreamDef(object):
+        def __init__(self, type, format, width, height, fps):
+            self.type = type
+            self.format = format
+            self.width = width  # zero for auto resolve
+            self.height = height  # zero for auto resolve
+            self.fps = fps
+
     def __init__(self, args):
-        self.STREAM_TYPE = [rs.stream.depth, rs.stream.color]
-        self.FORMAT = [rs.format.z16, rs.format.bgr8]
-        self.DEPTH_WIDTH = 640  # zero for auto resolve
-        self.DEPTH_HEIGHT = 480  # zero for auto resolve
-        self.COLOR_WIDTH = 640
-        self.COLOR_HEIGHT = 480
-        self.FPS = 30
+        self.stream_def_depth = D4XXToMAVLink.StreamDef(
+            type=rs.stream.depth,
+            format=rs.format.z16,
+            width=640,
+            height=480,
+            fps=30,
+        )
+        self.stream_def_color = D4XXToMAVLink.StreamDef(
+            rs.stream.color,
+            rs.format.bgr8,
+            640,
+            480,
+            30,
+        )
         self.DEPTH_MIN = 0.1
         self.DEPTH_MAX = 8.0
 
@@ -136,7 +151,6 @@ class D4XXToMAVLink(object):
         self.pipe = None
         self.depth_scale = 0
         self.colorizer = rs.colorizer()
-        self.depth_hfov_deg = None
         self.depth_vfov_deg = None
 
         # The name of the display window
@@ -145,7 +159,6 @@ class D4XXToMAVLink(object):
         # Data variables
         self.vehicle_pitch_rad = None
         self.current_time_us = 0
-        self.last_obstacle_distance_sent_ms = 0  # from current_time_us
 
         # Obstacle distances in front of the sensor, starting from the
         # left in increment degrees to the right
@@ -155,7 +168,6 @@ class D4XXToMAVLink(object):
         self.max_depth_cm = int(self.DEPTH_MAX * 100)
         self.distances_array_length = 72
         self.angle_offset = None
-        self.increment_f = None
         self.distances = (np.ones((self.distances_array_length,),
                                   dtype=np.uint16) * (self.max_depth_cm + 1))
 
@@ -218,24 +230,12 @@ class D4XXToMAVLink(object):
 
     # https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
     def send_obstacle_distance_message(self):
-        if self.current_time_us == self.last_obstacle_distance_sent_ms:
+        if self.current_time_us == self.obstacle_distance.time_usec:
             # no new frame
             return
-        self.last_obstacle_distance_sent_ms = self.current_time_us
-        if self.angle_offset is None or self.increment_f is None:
-            self.progress("call set_obstacle_distance_params")
-        else:
-            self.conn.mav.obstacle_distance_send(
-                self.current_time_us,    # us Timestamp
-                0,                  # sensor_type
-                self.distances,     # distances,    uint16_t[72],   cm
-                0,                  # increment,    uint8_t,        deg
-                self.min_depth_cm,  # min_distance, uint16_t,       cm
-                self.max_depth_cm,  # max_distance, uint16_t,       cm
-                self.increment_f,   # increment_f,  float,          deg
-                self.angle_offset,  # angle_offset, float,          deg
-                12                  # MAV_FRAME_BODY_FRD
-            )
+        self.obstacle_distance.time_usec = self.current_time_us
+
+        self.conn.mav.send(self.obstacle_distance)
 
     # https://mavlink.io/en/messages/common.html#DISTANCE_SENSOR
     def send_distance_sensor_message(self):
@@ -356,6 +356,15 @@ class D4XXToMAVLink(object):
 
         advnc_mode.load_json(json_text)
 
+    def enable_stream_in_config(self, config, stream_def):
+        config.enable_stream(
+            stream_def.type,
+            stream_def.width,
+            stream_def.height,
+            stream_def.format,
+            stream_def.fps,
+        )
+
     # Establish connection to the Realsense camera
     def realsense_connect(self):
         # we only require a device that does advanced mode if we're
@@ -370,23 +379,26 @@ class D4XXToMAVLink(object):
         config = rs.config()
         # connect to a specific device ID
         config.enable_device(dev.get_info(rs.camera_info.serial_number))
-        config.enable_stream(self.STREAM_TYPE[0],
-                             self.DEPTH_WIDTH,
-                             self.DEPTH_HEIGHT,
-                             self.FORMAT[0],
-                             self.FPS)
+
+        all_streams = [self.stream_def_depth]
         if self.RTSP_STREAMING_ENABLE is True:
-            config.enable_stream(self.STREAM_TYPE[1],
-                                 self.COLOR_WIDTH,
-                                 self.COLOR_HEIGHT,
-                                 self.FORMAT[1],
-                                 self.FPS)
+            all_streams.append(self.stream_def_color)
+
+        for stream in all_streams:
+            self.enable_stream_in_config(config, stream)
 
         # Declare RealSense pipe, encapsulating the actual device and sensors
         self.pipe = rs.pipeline()
 
         # Start streaming with requested config
         profile = self.pipe.start(config)
+
+        # grab the intrinsics for the streams:
+        for x in all_streams:
+            vsp = profile.get_stream(x.type).as_video_stream_profile()
+            x.intrinsics = vsp.intrinsics
+            self.progress("INFO: %s intrinsics: %s" %
+                          (str(x.type), x.intrinsics))
 
         # Getting the depth sensor's depth scale (see rs-align example
         # for explanation)
@@ -396,48 +408,41 @@ class D4XXToMAVLink(object):
 
     # Setting parameters for the OBSTACLE_DISTANCE message based on
     # actual camera's intrinsics and user-defined params
-    def set_obstacle_distance_params(self):
-        # Obtain the intrinsics from the camera itself
-        profiles = self.pipe.get_active_profile()
-        depth_intrinsics = profiles.get_stream(
-            self.STREAM_TYPE[0]).as_video_stream_profile().intrinsics
-        self.progress("INFO: Depth camera intrinsics: %s" % depth_intrinsics)
-
+    def set_obstacle_distance_params(self, depth_intrinsics):
         # For forward facing camera with a horizontal wide view:
         #   HFOV=2*atan[w/(2.fx)],
         #   VFOV=2*atan[h/(2.fy)],
         #   DFOV=2*atan(Diag/2*f),
         #   Diag=sqrt(w^2 + h^2)
-        self.depth_hfov_deg = m.degrees(2 * m.atan(self.DEPTH_WIDTH / (2 * depth_intrinsics.fx)))  # noqa
-        self.depth_vfov_deg = m.degrees(2 * m.atan(self.DEPTH_HEIGHT / (2 * depth_intrinsics.fy)))  # noqa
+        depth_hfov_deg = m.degrees(2 * m.atan(depth_intrinsics.width / (2 * depth_intrinsics.fx)))  # noqa
+        self.depth_vfov_deg = m.degrees(2 * m.atan(depth_intrinsics.height / (2 * depth_intrinsics.fy)))  # noqa
         self.progress("INFO: Depth camera HFOV: %0.2f degrees" %
-                      self.depth_hfov_deg)
+                      depth_hfov_deg)
         self.progress("INFO: Depth camera VFOV: %0.2f degrees" %
                       self.depth_vfov_deg)
 
-        self.angle_offset = (self.camera_facing_angle_degree -
-                             (self.depth_hfov_deg / 2))
-        self.increment_f = self.depth_hfov_deg / self.distances_array_length
-        self.progress("INFO: OBSTACLE_DISTANCE angle_offset: %0.3f" %
-                      self.angle_offset)
-        self.progress("INFO: OBSTACLE_DISTANCE increment_f: %0.3f" %
-                      self.increment_f)
+        angle_offset = (self.camera_facing_angle_degree -
+                        (depth_hfov_deg / 2))
+        increment_f = depth_hfov_deg / self.distances_array_length
+
+        self.obstacle_distance = self.conn.mav.obstacle_distance_encode(
+            0,    # us Timestamp
+            mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,   # sensor_type
+            self.distances,     # distances,    uint16_t[72],   cm
+            0,                  # increment,    uint8_t,        deg
+            self.min_depth_cm,  # min_distance, uint16_t,       cm
+            self.max_depth_cm,  # max_distance, uint16_t,       cm
+            increment_f,        # increment_f,  float,          deg
+            angle_offset,       # angle_offset, float,          deg
+            mavutil.mavlink.MAV_FRAME_BODY_FRD   # MAV_FRAME_BODY_FRD
+        )
+
+        self.progress("INFO: %s" % str(self.obstacle_distance))
         self.progress("INFO: OBSTACLE_DISTANCE coverage: from "
                       "%0.3f to %0.3f degrees" %
-                      (self.angle_offset,
-                       self.angle_offset + self.increment_f *
+                      (angle_offset,
+                       angle_offset + increment_f *
                        self.distances_array_length))
-
-        # Sanity check for depth configuration
-        if (self.obstacle_line_height_ratio < 0 or
-                self.obstacle_line_height_ratio > 1):
-            self.progress("Please make sure the horizontal position is within [0-1]: %s"  % self.obstacle_line_height_ratio)  # noqa
-            sys.exit()
-
-        if (self.obstacle_line_thickness_pixel < 1 or
-                self.obstacle_line_thickness_pixel > self.DEPTH_HEIGHT):
-            self.progress("Please make sure the thickness is within [0-self.DEPTH_HEIGHT]: %s" % self.obstacle_line_thickness_pixel)  # noqa
-            sys.exit()
 
     # Find height of the horizontal line to calculate the obstacle distances
     #   - Basis: depth camera's vertical FOV, user's input
@@ -484,11 +489,7 @@ class D4XXToMAVLink(object):
 
     # @njit Uncomment to optimize for performance. This uses numba
     # which requires llmvlite (see instruction at the top)
-    def distances_from_depth_image(self,
-                                   obstacle_line_height,
-                                   depth_mat,
-                                   min_depth_m,
-                                   max_depth_m):
+    def distances_from_depth_image(self, obstacle_line_height, depth_mat):
         # Parameters for depth image
         depth_img_width = depth_mat.shape[1]
         depth_img_height = depth_mat.shape[0]
@@ -534,7 +535,7 @@ class D4XXToMAVLink(object):
             self.distances[i] = 65535
 
             # Note that dist_m is in meter, while distances[] is in cm.
-            if dist_m > min_depth_m and dist_m < max_depth_m:
+            if dist_m > self.DEPTH_MIN and dist_m < self.DEPTH_MAX:
                 self.distances[i] = dist_m * 100
 
     #####################################################
@@ -654,7 +655,11 @@ class D4XXToMAVLink(object):
 
         signal.setitimer(signal.ITIMER_REAL, 0)  # cancel alarm
 
-        self.set_obstacle_distance_params()
+        self.set_obstacle_distance_params(self.stream_def_depth.intrinsics)
+
+        # set a couple of convenience variables for now:
+        self.DEPTH_WIDTH = self.stream_def_depth.intrinsics.width
+        self.DEPTH_HEIGHT = self.stream_def_depth.intrinsics.height
 
         # Send MAVlink messages in the background at pre-determined frequencies
         sched = BackgroundScheduler()
@@ -685,10 +690,11 @@ class D4XXToMAVLink(object):
             self.send_msg_to_gcs('RTSP at rtsp://' + self.get_local_ip() +
                                  ':' + self.RTSP_PORT + self.RTSP_MOUNT_POINT)
             Gst.init(None)
-            self.gstserver = D4XXToMAVLink.GstServer(self.RTSP_MOUNT_POINT,
-                                                     self.COLOR_WIDTH,
-                                                     self.COLOR_HEIGHT,
-                                                     self.FPS)
+            self.gstserver = D4XXToMAVLink.GstServer(
+                self.RTSP_MOUNT_POINT,
+                self.stream_def_color.intrinsics.width,
+                self.stream_def_color.intrinsics.height,
+                self.stream_def_color.fps)
             glib_loop = GLib.MainLoop()
             glib_thread = threading.Thread(target=glib_loop.run, args=())
             glib_thread.start()
@@ -748,9 +754,7 @@ class D4XXToMAVLink(object):
                 # Create obstacle distance data from depth image
                 obstacle_line_height = self.find_obstacle_line_height()
                 self.distances_from_depth_image(obstacle_line_height,
-                                                depth_mat,
-                                                self.DEPTH_MIN,
-                                                self.DEPTH_MAX)
+                                                depth_mat)
 
                 if self.RTSP_STREAMING_ENABLE is True:
                     color_frame = frames.get_color_frame()
