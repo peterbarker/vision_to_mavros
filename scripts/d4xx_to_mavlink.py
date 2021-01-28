@@ -117,22 +117,15 @@ class D4XXToMAVLink(object):
             filt.set_option(rs.option.min_distance, self.DEPTH_MIN)
             filt.set_option(rs.option.max_distance, self.DEPTH_MAX)
 
-        # Default configurations for connection to the FCU
-        self.connection_string_default = '/dev/ttyUSB0'
-        self.connection_baudrate_default = 921600
-
         # Use this to rotate all processed data
         self.camera_facing_angle_degree = 0
 
         # Enable/disable each message/function individually
         self.enable_msg_obstacle_distance = True
         self.enable_msg_distance_sensor = False
-        self.obstacle_distance_msg_hz_default = 15.0
 
         # lock for thread synchronization
         self.lock = threading.Lock()
-
-        self.debug_enable_default = 0
 
         # default exit code is failure - a graceful termination with a
         # terminate signal is possible.
@@ -172,30 +165,12 @@ class D4XXToMAVLink(object):
         self.debug_enable = args.debug_enable
         self.camera_name = args.camera_name
 
-        # Using default values if no specified inputs
-        if not self.connection_string:
-            self.connection_string = self.connection_string_default
-            self.progress("INFO: Using default connection_string %s" %
-                          self.connection_string)
-        else:
-            self.progress("INFO: Using connection_string %s" %
-                          self.connection_string)
-
-        if not self.connection_baudrate:
-            self.connection_baudrate = self.connection_baudrate_default
-            self.progress("INFO: Using default connection_baudrate %s" %
-                          self.connection_baudrate)
-        else:
-            self.progress("INFO: Using connection_baudrate %s" %
-                          self.connection_baudrate)
-
-        if not self.obstacle_distance_msg_hz:
-            self.obstacle_distance_msg_hz = self.obstacle_distance_msg_hz_default  # noqa
-            self.progress("INFO: Using default obstacle_distance_msg_hz %s" %
-                          self.obstacle_distance_msg_hz)
-        else:
-            self.progress("INFO: Using obstacle_distance_msg_hz %s" %
-                          self.obstacle_distance_msg_hz)
+        self.progress("INFO: Using connection_string %s" %
+                      self.connection_string)
+        self.progress("INFO: Using connection_baudrate %s" %
+                      self.connection_baudrate)
+        self.progress("INFO: Using obstacle_distance_msg_hz %s" %
+                      self.obstacle_distance_msg_hz)
 
         # The list of filters to be applied on the depth image
         for i in range(len(self.filters)):
@@ -204,10 +179,7 @@ class D4XXToMAVLink(object):
             else:
                 self.progress("INFO: NOT applying: %s" % self.filters[i][1])
 
-        if not self.debug_enable:
-            self.debug_enable = self.debug_enable_default
-
-        if self.debug_enable == 1:
+        if self.debug_enable:
             self.progress("INFO: Debugging option enabled")
             cv2.namedWindow(self.display_name, cv2.WINDOW_AUTOSIZE)
         else:
@@ -310,7 +282,7 @@ class D4XXToMAVLink(object):
     # ATTITUDE data: https://mavlink.io/en/messages/common.html#ATTITUDE
     def att_msg_callback(self, value):
         self.vehicle_pitch_rad = value.pitch
-        if self.debug_enable == 1:
+        if self.debug_enable:
             self.progress("INFO: ATTITUDE: pitch=%.2f degrees" %
                           (m.degrees(self.vehicle_pitch_rad),))
 
@@ -318,7 +290,7 @@ class D4XXToMAVLink(object):
     # https://mavlink.io/en/messages/ardupilotmega.html#AHRS2
     def ahrs2_msg_callback(self, value):
         self.vehicle_pitch_rad = value.pitch
-        if self.debug_enable == 1:
+        if self.debug_enable:
             self.progress("INFO: AHRS2: pitch=%.2f degrees" %
                           (m.degrees(self.vehicle_pitch_rad)))
 
@@ -799,7 +771,7 @@ class D4XXToMAVLink(object):
                     color_image = np.asanyarray(color_frame.get_data())
                     self.gstserver.set_frame(color_image)
 
-                if self.debug_enable == 1:
+                if self.debug_enable:
                     # Prepare the data
                     input_image = np.asanyarray(
                         self.colorizer.colorize(depth_frame).get_data())
@@ -870,18 +842,22 @@ class D4XXToMAVLink(object):
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description='Reboots vehicle')
+    parser = argparse.ArgumentParser(
+        description='Gates data from Intel RealSense D4xx cameras to MAVLink',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument('--connect',
-                        help="Vehicle connection target string. "
-                        "If not specified, a default string will be used.")
-    parser.add_argument('--baudrate', type=float,
-                        help="Vehicle connection baudrate. "
-                        "If not specified, a default value will be used.")
+                        help="Vehicle connection target string",
+                        default='/dev/ttyUSB0')
+    parser.add_argument('--baudrate', type=int,
+                        help="Vehicle connection baudrate",
+                        default=921600)
     parser.add_argument('--obstacle_distance_msg_hz', type=float,
-                        help="Update frequency for OBSTACLE_DISTANCE message. "
-                        "If not specified, a default value will be used.")
-    parser.add_argument('--debug_enable', type=float,
-                        help="Enable debugging information")
+                        help="Update frequency for OBSTACLE_DISTANCE message",
+                        default=15.0)
+    parser.add_argument('--debug_enable', type=bool,
+                        help="Enable debugging information",
+                        default=False)
     parser.add_argument('--camera_name', type=str,
                         help="Camera name to be connected to. If not specified, any valid camera will be connected to randomly. For eg: type 'D435I' to look for Intel RealSense D435I.")  # noqa
 
