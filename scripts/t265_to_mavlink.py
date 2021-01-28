@@ -135,7 +135,7 @@ reset_counter = 1
 # Parsing user' inputs
 #######################################
 
-parser = argparse.ArgumentParser(description='Reboots vehicle')
+parser = argparse.ArgumentParser(description='Gates data from Intel RealSense T265 camera to a mavlink connection')
 parser.add_argument('--connect',
                     help="Vehicle connection target string. If not specified, a default string will be used.")
 parser.add_argument('--baudrate', type=float,
