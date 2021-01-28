@@ -775,7 +775,6 @@ class D4XXToMAVLink(object):
                 # wait_for_frames(...) is called
                 frames = self.pipe.wait_for_frames()
                 depth_frame = frames.get_depth_frame()
-                color_frame = frames.get_color_frame()
 
                 if not depth_frame:
                     continue
@@ -802,6 +801,7 @@ class D4XXToMAVLink(object):
                                                 self.DEPTH_RANGE_M[1])
 
                 if self.RTSP_STREAMING_ENABLE is True:
+                    color_frame = frames.get_color_frame()
                     color_image = np.asanyarray(color_frame.get_data())
                     self.gstserver.set_frame(color_image)
 
