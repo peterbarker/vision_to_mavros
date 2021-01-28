@@ -72,6 +72,13 @@ class D4XXToMAVLink(object):
             self.fps = fps
 
     def __init__(self, args):
+
+        self.connection_string = args.connect
+        self.connection_baudrate = args.baudrate
+        self.obstacle_distance_msg_hz = args.obstacle_distance_msg_hz
+        self.debug_enable = args.debug_enable
+        self.camera_name = args.camera_name
+
         self.stream_def_depth = D4XXToMAVLink.StreamDef(
             type=rs.stream.depth,
             format=rs.format.z16,
@@ -170,12 +177,6 @@ class D4XXToMAVLink(object):
         self.angle_offset = None
         self.distances = (np.ones((self.distances_array_length,),
                                   dtype=np.uint16) * (self.max_depth_cm + 1))
-
-        self.connection_string = args.connect
-        self.connection_baudrate = args.baudrate
-        self.obstacle_distance_msg_hz = args.obstacle_distance_msg_hz
-        self.debug_enable = args.debug_enable
-        self.camera_name = args.camera_name
 
         self.progress("INFO: Using connection_string %s" %
                       self.connection_string)
