@@ -238,20 +238,6 @@ class D4XXToMAVLink(object):
             )
 
     # https://mavlink.io/en/messages/common.html#DISTANCE_SENSOR
-    def send_single_distance_sensor_msg(self, distance, orientation):
-        # Average out a portion of the centermost part
-        self.conn.mav.distance_sensor_send(
-            0,                  # ms Timestamp
-            self.min_depth_cm,       # min_distance, uint16_t, cm
-            self.max_depth_cm,       # min_distance, uint16_t, cm
-            distance,           # current_distance,	uint16_t, cm
-            0,	                # type : 0 (ignored)
-            0,                  # id : 0 (ignored)
-            orientation,        # orientation
-            0                   # covariance : 0 (ignored)
-        )
-
-    # https://mavlink.io/en/messages/common.html#DISTANCE_SENSOR
     def send_distance_sensor_message(self):
         # Average out a portion of the centermost part
         curr_dist = int(np.mean(self.distances[33:38]))
