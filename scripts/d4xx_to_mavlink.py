@@ -124,9 +124,6 @@ class D4XXToMAVLink(object):
         # Use this to rotate all processed data
         self.camera_facing_angle_degree = 0
 
-        # Store device serial numbers of connected camera
-        self.device_id = None
-
         # Enable/disable each message/function individually
         self.enable_msg_obstacle_distance = True
         self.enable_msg_distance_sensor = False
@@ -329,7 +326,7 @@ class D4XXToMAVLink(object):
     #  Functions - D4xx cameras                        ##
     #####################################################
 
-    def find_device_that_supports_advanced_mode(self):
+    def find_device(self, require_advanced_mode=False):
         DS5_ids = frozenset([
             "0AD1",
             "0AD2",
@@ -351,51 +348,51 @@ class D4XXToMAVLink(object):
                 continue
             if not dev.supports(rs.camera_info.name):
                 continue
-            if str(dev.get_info(rs.camera_info.product_id)) not in DS5_ids:
-                continue
+            if require_advanced_mode:
+                if str(dev.get_info(rs.camera_info.product_id)) not in DS5_ids:
+                    continue
             name = dev.get_info(rs.camera_info.name)
             if (self.camera_name is not None and
                     self.camera_name.lower() != name.split()[2].lower()):
                 # user wants a specific camera, and this is not it
                 continue
-            self.progress("INFO: Found device supporting advanced mode: %s" %
-                          name)
-            self.device_id = dev.get_info(rs.camera_info.serial_number)
+            self.progress("INFO: Found device: %s" % name)
             return dev
-        raise Exception("No device that supports advanced mode was found")
+        raise Exception("No device found")
+
+    def find_device_by_serial(self, serial):
+        for dev in rs.context().query_devices():
+            if dev.get_info(rs.camera_info.serial_number) == serial:
+                return dev
+        raise ValueError("No such serial number present")
 
     # Loop until we successfully enable advanced mode
-    def realsense_enable_advanced_mode(self, advnc_mode):
-        while not advnc_mode.is_enabled():
-            self.progress("INFO: Trying to enable advanced mode...")
-            advnc_mode.toggle_advanced_mode(True)
-            # At this point the device will disconnect and re-connect.
-            self.progress("INFO: Sleeping for 5 seconds...")
-            time.sleep(5)
-            # The 'dev' object will become invalid and we need to
-            # initialize it again
-            dev = self.find_device_that_supports_advanced_mode()
+    def realsense_enable_advanced_mode(self, dev):
+        serial = dev.get_info(rs.camera_info.serial_number)
+        for attempts in range(10):
             advnc_mode = rs.rs400_advanced_mode(dev)
-            self.progress("INFO: Advanced mode is %s" "enabled"
-                          if advnc_mode.is_enabled() else "disabled")
+            if advnc_mode.is_enabled():
+                self.progress("INFO: Advanced mode is enabled")
+                return dev
+
+            self.progress("INFO: Trying to enable advanced mode...")
+
+            advnc_mode.toggle_advanced_mode(True)
+
+            # At this point the device will disconnect and re-connect.
+            # Our existing "dev" will be stale.
+            while True:
+                try:
+                    dev = self.find_device_by_serial(serial)
+                except ValueError:
+                    time.sleep(0.1)
+        raise Exception("Failed to set advanced mode")
 
     # Load the settings stored in the JSON file
-    def realsense_load_settings_file(self, advnc_mode, setting_file):
-        # Sanity checks
-        if os.path.isfile(setting_file):
-            self.progress("INFO: Setting file found %s" % setting_file)
-        else:
-            self.progress("INFO: Cannot find setting file %s" % setting_file)
-            exit()
-
-        if advnc_mode.is_enabled():
-            self.progress("INFO: Advanced mode is enabled")
-        else:
-            self.progress("INFO: Device does not support advanced mode")
-            exit()
-
+    def realsense_load_settings_file(self, dev, setting_file):
         # Input for load_json() is the content of the json file, not
         # the file path
+        advnc_mode = rs.rs400_advanced_mode(dev)
         with open(setting_file, 'r') as file:
             json_text = file.read().strip()
 
@@ -403,14 +400,18 @@ class D4XXToMAVLink(object):
 
     # Establish connection to the Realsense camera
     def realsense_connect(self):
-        # Declare RealSense pipe, encapsulating the actual device and sensors
-        self.pipe = rs.pipeline()
+        # we only require a device that does advanced mode if we're
+        # passing in a preset file:
+        dev = self.find_device(require_advanced_mode=self.USE_PRESET_FILE)
 
-        # Configure image stream(s)
+        if self.USE_PRESET_FILE:
+            dev = self.realsense_enable_advanced_mode(dev)
+            self.realsense_load_settings_file(dev, self.PRESET_FILE)
+
+        # Create configuration for image stream(s)
         config = rs.config()
-        if self.device_id:
-            # connect to a specific device ID
-            config.enable_device(self.device_id)
+        # connect to a specific device ID
+        config.enable_device(dev.get_info(rs.camera_info.serial_number))
         config.enable_stream(self.STREAM_TYPE[0],
                              self.DEPTH_WIDTH,
                              self.DEPTH_HEIGHT,
@@ -423,6 +424,9 @@ class D4XXToMAVLink(object):
                                  self.FORMAT[1],
                                  self.FPS)
 
+        # Declare RealSense pipe, encapsulating the actual device and sensors
+        self.pipe = rs.pipeline()
+
         # Start streaming with requested config
         profile = self.pipe.start(config)
 
@@ -431,12 +435,6 @@ class D4XXToMAVLink(object):
         depth_sensor = profile.get_device().first_depth_sensor()
         self.depth_scale = depth_sensor.get_depth_scale()
         self.progress("INFO: Depth scale is: %s" % self.depth_scale)
-
-    def realsense_configure_setting(self, setting_file):
-        device = self.find_device_that_supports_advanced_mode()
-        advnc_mode = rs.rs400_advanced_mode(device)
-        self.realsense_enable_advanced_mode(advnc_mode)
-        self.realsense_load_settings_file(advnc_mode, setting_file)
 
     # Setting parameters for the OBSTACLE_DISTANCE message based on
     # actual camera's intrinsics and user-defined params
@@ -693,8 +691,6 @@ class D4XXToMAVLink(object):
         signal.setitimer(signal.ITIMER_REAL, 5)  # seconds...
 
         self.send_msg_to_gcs('Connecting to camera...')
-        if self.USE_PRESET_FILE:
-            self.realsense_configure_setting(self.PRESET_FILE)
         self.realsense_connect()
         self.send_msg_to_gcs('Camera connected.')
 
