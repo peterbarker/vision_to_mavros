@@ -330,7 +330,7 @@ class D4XXToMAVLink(object):
     #####################################################
 
     def find_device_that_supports_advanced_mode(self):
-        DS5_product_ids = [
+        DS5_ids = frozenset([
             "0AD1",
             "0AD2",
             "0AD3",
@@ -345,24 +345,23 @@ class D4XXToMAVLink(object):
             "0B07",
             "0B3A",
             "0B5C",
-        ]
-        ctx = rs.context()
-        devices = ctx.query_devices()
-        for dev in devices:
-            if (dev.supports(rs.camera_info.product_id) and
-                    str(dev.get_info(rs.camera_info.product_id)) in
-                    DS5_product_ids):
-                name = rs.camera_info.name
-                if dev.supports(name):
-                    if (not self.camera_name or
-                        (self.camera_name.lower() ==
-                         dev.get_info(name).split()[2].lower())):
-                        self.progress("INFO: Found device "
-                                      "that supports advanced mode: %s" %
-                                      dev.get_info(name))
-                        self.device_id = dev.get_info(
-                            rs.camera_info.serial_number)
-                        return dev
+        ])
+        for dev in rs.context().query_devices():
+            if not dev.supports(rs.camera_info.product_id):
+                continue
+            if not dev.supports(rs.camera_info.name):
+                continue
+            if str(dev.get_info(rs.camera_info.product_id)) not in DS5_ids:
+                continue
+            name = dev.get_info(rs.camera_info.name)
+            if (self.camera_name is not None and
+                    self.camera_name.lower() != name.split()[2].lower()):
+                # user wants a specific camera, and this is not it
+                continue
+            self.progress("INFO: Found device supporting advanced mode: %s" %
+                          name)
+            self.device_id = dev.get_info(rs.camera_info.serial_number)
+            return dev
         raise Exception("No device that supports advanced mode was found")
 
     # Loop until we successfully enable advanced mode
