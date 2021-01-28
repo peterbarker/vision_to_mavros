@@ -71,7 +71,8 @@ class D4XXToMAVLink(object):
         self.COLOR_WIDTH = 640
         self.COLOR_HEIGHT = 480
         self.FPS = 30
-        self.DEPTH_RANGE_M = [0.1, 8.0]
+        self.DEPTH_MIN = 0.1
+        self.DEPTH_MAX = 8.0
 
         # The height of the horizontal line to find distance to
         # obstacle.  [0-1]: 0-Top, 1-Bottom.
@@ -111,12 +112,10 @@ class D4XXToMAVLink(object):
         # filters[0][2].set_option(rs.option.filter_magnitude,
         # decimation_magnitude)
 
-        threshold_min_m = self.DEPTH_RANGE_M[0]
-        threshold_max_m = self.DEPTH_RANGE_M[1]
         if self.filters[1][0] is True:
             filt = self.filters[1][2]
-            filt.set_option(rs.option.min_distance, threshold_min_m)
-            filt.set_option(rs.option.max_distance, threshold_max_m)
+            filt.set_option(rs.option.min_distance, self.DEPTH_MIN)
+            filt.set_option(rs.option.max_distance, self.DEPTH_MAX)
 
         # Default configurations for connection to the FCU
         self.connection_string_default = '/dev/ttyUSB0'
@@ -162,8 +161,8 @@ class D4XXToMAVLink(object):
         # left in increment degrees to the right
         # See: https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
 
-        self.min_depth_cm = int(self.DEPTH_RANGE_M[0] * 100)
-        self.max_depth_cm = int(self.DEPTH_RANGE_M[1] * 100)
+        self.min_depth_cm = int(self.DEPTH_MIN * 100)
+        self.max_depth_cm = int(self.DEPTH_MAX * 100)
         self.distances_array_length = 72
         self.angle_offset = None
         self.increment_f = None
@@ -797,8 +796,8 @@ class D4XXToMAVLink(object):
                 obstacle_line_height = self.find_obstacle_line_height()
                 self.distances_from_depth_image(obstacle_line_height,
                                                 depth_mat,
-                                                self.DEPTH_RANGE_M[0],
-                                                self.DEPTH_RANGE_M[1])
+                                                self.DEPTH_MIN,
+                                                self.DEPTH_MAX)
 
                 if self.RTSP_STREAMING_ENABLE is True:
                     color_frame = frames.get_color_frame()
