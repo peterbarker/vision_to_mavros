@@ -34,6 +34,7 @@ import signal
 import socket
 import sys
 import threading
+import traceback
 import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -725,6 +726,13 @@ class D4XXToMAVLink(object):
         while count == self.heartbeat_count:
             time.sleep(0.1)
 
+    def get_exception_stacktrace(self, e):
+        ret = "%s\n" % e
+        ret += ''.join(traceback.format_exception(etype=type(e),
+                                                  value=e,
+                                                  tb=e.__traceback__))
+        return ret
+
     def run(self):
         try:
             # Note: 'version' attribute is supported from pyrealsense2
@@ -914,10 +922,8 @@ class D4XXToMAVLink(object):
                     last_time = time.time()
 
         except Exception as e:
-            self.progress(e)
-
-        except Exception as e:
-            self.send_msg_to_gcs('ERROR: Depth camera disconnected')
+            self.progress("Exception caught")
+            self.progress(self.get_exception_stacktrace(e))
 
         finally:
             self.progress('Closing the script...')
