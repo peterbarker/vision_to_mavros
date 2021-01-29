@@ -102,11 +102,10 @@ class D4XXToMAVLink(object):
         self.parameters = {
             "SR_OBS_DIS": 15,
             "SR_DIS_SENS": 0,
+            "DEPTH_MIN": 0.1,
+            "DEPTH_MAX": 8.0,
         }
         self.load_parameters()
-
-        self.DEPTH_MIN = 0.1
-        self.DEPTH_MAX = 8.0
 
         # The height of the horizontal line to find distance to
         # obstacle.  [0-1]: 0-Top, 1-Bottom.
@@ -148,8 +147,10 @@ class D4XXToMAVLink(object):
 
         if self.filters[1][0] is True:
             filt = self.filters[1][2]
-            filt.set_option(rs.option.min_distance, self.DEPTH_MIN)
-            filt.set_option(rs.option.max_distance, self.DEPTH_MAX)
+            filt.set_option(rs.option.min_distance,
+                            self.parameters["DEPTH_MIN"])
+            filt.set_option(rs.option.max_distance,
+                            self.parameters["DEPTH_MAX"])
 
         # Use this to rotate all processed data
         self.camera_facing_angle_degree = 0
@@ -179,12 +180,11 @@ class D4XXToMAVLink(object):
         # left in increment degrees to the right
         # See: https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
 
-        self.min_depth_cm = int(self.DEPTH_MIN * 100)
-        self.max_depth_cm = int(self.DEPTH_MAX * 100)
         self.distances_array_length = 72
         self.angle_offset = None
+        max_depth_cm = int(self.parameters["DEPTH_MAX"] * 100)
         self.distances = (np.ones((self.distances_array_length,),
-                                  dtype=np.uint16) * (self.max_depth_cm + 1))
+                                  dtype=np.uint16) * (max_depth_cm + 1))
 
         self.progress("INFO: Using connection_string %s" %
                       self.connection_string)
@@ -251,10 +251,12 @@ class D4XXToMAVLink(object):
     def send_distance_sensor_message(self):
         # Average out a portion of the centermost part
         curr_dist = int(np.mean(self.distances[33:38]))
+        min_depth_cm = int(self.parameters["DEPTH_MIN"] * 100)
+        max_depth_cm = int(self.parameters["DEPTH_MAX"] * 100)
         self.conn.mav.distance_sensor_send(
             0,  # ms Timestamp (UNIX time or time since system boot)
-            self.min_depth_cm,   # min_distance, uint16_t, cm
-            self.max_depth_cm,   # min_distance, uint16_t, cm
+            min_depth_cm,   # min_distance, uint16_t, cm
+            max_depth_cm,   # min_distance, uint16_t, cm
             curr_dist,      # current_distance,	uint16_t, cm
             0,	            # type : 0 (ignored)
             0,              # id : 0 (ignored)
@@ -296,7 +298,7 @@ class D4XXToMAVLink(object):
             return
         with open(self.parameter_file) as f:
             x = f.read()
-        self.parameters = json.loads(x)
+        self.parameters.update(json.loads(x))
 
     def persist_parameters(self):
         if self.parameter_file is None:
@@ -511,13 +513,15 @@ class D4XXToMAVLink(object):
                         (depth_hfov_deg / 2))
         increment_f = depth_hfov_deg / self.distances_array_length
 
+        min_depth_cm = int(self.parameters["DEPTH_MIN"] * 100)
+        max_depth_cm = int(self.parameters["DEPTH_MAX"] * 100)
         self.obstacle_distance = self.conn.mav.obstacle_distance_encode(
             0,    # us Timestamp
             mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,   # sensor_type
             self.distances,     # distances,    uint16_t[72],   cm
             0,                  # increment,    uint8_t,        deg
-            self.min_depth_cm,  # min_distance, uint16_t,       cm
-            self.max_depth_cm,  # max_distance, uint16_t,       cm
+            min_depth_cm,  # min_distance, uint16_t,       cm
+            max_depth_cm,  # max_distance, uint16_t,       cm
             increment_f,        # increment_f,  float,          deg
             angle_offset,       # angle_offset, float,          deg
             mavutil.mavlink.MAV_FRAME_BODY_FRD   # MAV_FRAME_BODY_FRD
@@ -621,7 +625,8 @@ class D4XXToMAVLink(object):
             self.distances[i] = 65535
 
             # Note that dist_m is in meter, while distances[] is in cm.
-            if dist_m > self.DEPTH_MIN and dist_m < self.DEPTH_MAX:
+            if (dist_m > self.parameters["DEPTH_MIN"] and
+                    dist_m < self.parameters["DEPTH_MAX"]):
                 self.distances[i] = dist_m * 100
 
     #####################################################
