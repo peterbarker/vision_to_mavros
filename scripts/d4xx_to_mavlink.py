@@ -87,6 +87,8 @@ class D4XXToMAVLink(object):
         self.camera_name = args.camera_name
         self.parameter_file = args.parameter_file
 
+        self.system_start_time = time.time()
+
         self.stream_def_depth = D4XXToMAVLink.StreamDef(
             type=rs.stream.depth,
             format=rs.format.z16,
@@ -105,6 +107,7 @@ class D4XXToMAVLink(object):
         # parameters and their default values; note 16 char limit!
         self.parameters = {
             "SR_OBS_DIS": 15,
+            "SR_OBS_DIS_3D": 5,
             "SR_DIS_SENS": 0,
             "DEPTH_MIN": 0.1,
             "DEPTH_MAX": 8.0,
@@ -174,16 +177,21 @@ class D4XXToMAVLink(object):
         # Data variables
         self.vehicle_pitch_rad = None
         self.current_time_us = 0
+        self.frame_time = 0
 
         # Obstacle distances in front of the sensor, starting from the
         # left in increment degrees to the right
         # See: https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
+
+        self.next_obstacle_coordinate = 0
 
         self.distances_array_length = 72
         self.angle_offset = None
         max_depth_cm = int(self.parameters["DEPTH_MAX"] * 100)
         self.distances = (np.ones((self.distances_array_length,),
                                   dtype=np.uint16) * (max_depth_cm + 1))
+
+        self.obstacle_coordinates = np.ones((9, 3), dtype=np.float) * (9999)
 
         self.progress("INFO: Using connection_string %s" %
                       self.connection_string)
@@ -259,6 +267,34 @@ class D4XXToMAVLink(object):
         self.distance_sensor.current_distance = curr_dist
 
         self.conn.mav.send(self.distance_sensor)
+
+    def send_obstacle_distance_3d_message(self):
+        if self.frame_time == 0:
+            # no data from camera yet
+            return
+        time_boot_ms = int((self.frame_time - self.system_start_time)*1000)
+
+        if self.next_obstacle_coordinate >= len(self.obstacle_coordinates):
+            if time_boot_ms == self.obstacle_distance_3d.time_boot_ms:
+                # no new frame
+                return
+            self.next_obstacle_coordinate = 0
+            self.obstacle_distance_3d.time_boot_ms = time_boot_ms
+
+        obs = self.obstacle_coordinates[self.next_obstacle_coordinate]
+
+        self.obstacle_distance_3d.obstacle_id = self.next_obstacle_coordinate
+        self.obstacle_distance_3d.x = obs[0]
+        self.obstacle_distance_3d.y = obs[1]
+        self.obstacle_distance_3d.z = obs[2]
+
+        try:
+            self.conn.mav.send(self.obstacle_distance_3d)
+        except struct.error:
+            self.progress("ERROR: failed to send (%s)" %
+                          (str(self.obstacle_distance_3d),))
+
+        self.next_obstacle_coordinate += 1
 
     def send_msg_to_gcs(self, text_to_be_sent):
         text_msg = 'D4xx: ' + text_to_be_sent
@@ -561,6 +597,19 @@ class D4XXToMAVLink(object):
         )
         self.progress("INFO: %s" % str(self.distance_sensor))
 
+        self.obstacle_distance_3d = self.conn.mav.obstacle_distance_3d_encode(
+            0,    # us Timestamp (UNIX time or time since system boot)
+            mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,   # sensor_type
+            mavutil.mavlink.MAV_FRAME_BODY_FRD,   # MAV_FRAME_BODY_FRD
+            65535,  # obstacle ID (65535 is "unknown")
+            0,  # X
+            0,  # Y
+            0,  # z
+            self.parameters["DEPTH_MIN"],
+            self.parameters["DEPTH_MAX"]
+        )
+        self.progress("INFO: %s" % str(self.obstacle_distance_3d))
+
     # Find height of the horizontal line to calculate the obstacle distances
     #   - Basis: depth camera's vertical FOV, user's input
     #   - Compensation: vehicle's current pitch angle
@@ -655,6 +704,106 @@ class D4XXToMAVLink(object):
             if (dist_m > self.parameters["DEPTH_MIN"] and
                     dist_m < self.parameters["DEPTH_MAX"]):
                 self.distances[i] = dist_m * 100
+
+    def populate_obstacle_coordinates_from_depth_image(self, depth_mat):
+        '''populates self.obstacle_coordinates based on depth_mat'''
+
+        # roughly:
+        #  - divide image into a 3x3 grid
+        #  - sample each square in increments both x/y
+        #  - remember the coordinates and distance of the closest point
+        #         for each grid section
+        #  - after sampling is complete, convert the 9 coordinates into x/y/z
+
+        depth_img_width = depth_mat.shape[1]
+        depth_img_height = depth_mat.shape[0]
+
+        rows = 3
+        columns = 3
+
+        # holds the minimum distances and pixelx/pixely for each graph
+        # region; pixel_depth[row][column]
+        # yes, we're storing x, y as floats....
+        pixel_depths = np.zeros((rows, columns, 3), dtype=np.float)
+        for r in pixel_depths:
+            for c in r:
+                c[2] = 9999
+
+        # number of samples across/down to take across entire depth
+        # image.  These two numbers limit how much CPU we will use
+        # finding the closest point
+        depth_samples_x = 40
+        depth_samples_y = 40
+
+        # grid_partion sizes:
+        grid_partition_x = int(depth_img_width / columns)
+        grid_partition_y = int(depth_img_height / rows)
+
+        # number of pixels between each sample in the grid partitions:
+        step_x = int(depth_img_width / depth_samples_x)
+        step_y = int(depth_img_height / depth_samples_y)
+
+        # to give a regular pattern across the grid we calculate and
+        # add a margin to the pixel locations:
+        margin_x = int((depth_img_width - columns*grid_partition_x) / 2)
+        margin_y = int((depth_img_height - rows*grid_partition_y) / 2)
+
+        for r in range(rows):
+            y = int((r * depth_img_height) / rows)  # grid partition TL y
+            for c in range(columns):
+                x = int((c * depth_img_width) / columns)  # grid partition TL x
+                for sy in range(0, grid_partition_y, step_y):
+                    y_pixel = y + margin_y + sy
+#                    print("y=%u margin_y=%u sy=%u y_pixel=%u" %
+#                          (y, margin_y, sy, y_pixel))
+                    for sx in range(0, grid_partition_x, step_x):
+                        x_pixel = x + margin_x + sx
+#                        print("  x=%u margin_x=%u sx=%u x_pixel=%u" %
+#                              (x, margin_x, sx, x_pixel))
+                        point_depth = depth_mat[y_pixel, x_pixel]
+                        point_depth *= self.depth_scale
+#                            print("  x=%u margin_x=%u"
+#                                  "sx=%u x_pixel=%u depth %f" %
+#                                  (x, margin_x, sx, x_pixel, point_depth))
+                        if point_depth < self.parameters["DEPTH_MIN"]:
+                            # too close - ignore
+                            continue
+                        if point_depth > pixel_depths[r, c, 2]:
+                            # no closer
+                            continue
+                        pixel_depths[r, c, 0] = y_pixel
+                        pixel_depths[r, c, 1] = x_pixel
+                        pixel_depths[r, c, 2] = point_depth
+
+        self.obstacle_coordinates = np.ones((9, 3), dtype=np.float) * 9999
+
+        count = 0
+        for r in pixel_depths:
+            for c in r:
+                # consider converting pixel coords to obstacle coords:
+                if c[2] < self.parameters["DEPTH_MAX"]:
+                    coordinates = self.pixel_to_xyz(c)
+                    self.obstacle_coordinates[count] = coordinates
+                count += 1
+
+    def pixel_to_xyz(self, depth_pixel):
+        depth_intrinsics = self.stream_def_depth.intrinsics
+        result = rs.rs2_deproject_pixel_to_point(
+            depth_intrinsics,
+            [depth_pixel[0], depth_pixel[1]],
+            depth_pixel[2])
+
+        center_pixel = [depth_intrinsics.ppy/2, depth_intrinsics.ppx/2]
+        result_center = rs.rs2_deproject_pixel_to_point(
+            depth_intrinsics,
+            center_pixel,
+            depth_pixel[2])
+
+        return (
+            result[2],
+            (result[1] - result_center[1]),
+            -(result[0] - result_center[0])
+        )
 
     #####################################################
     #  Functions - RTSP Streaming ##
@@ -807,6 +956,9 @@ class D4XXToMAVLink(object):
             ("SR_OBS_DIS",
              "OBSTACLE_DISTANCE",
              self.send_obstacle_distance_message),
+            ("SR_OBS_DIS_3D",
+             "OBSTACLE_DISTANCE_3D",
+             self.send_obstacle_distance_3d_message),
             ("SR_DIS_SENS",
              "DISTANCE_SENSOR",
              self.send_distance_sensor_message),
@@ -861,6 +1013,7 @@ class D4XXToMAVLink(object):
 
                 # Store the timestamp for MAVLink messages
                 self.current_time_us = int(round(time.time() * 1000000))
+                self.frame_time = time.time()
 
                 # Apply the filters
                 filtered_frame = depth_frame
@@ -877,6 +1030,8 @@ class D4XXToMAVLink(object):
                 obstacle_line_height = self.find_obstacle_line_height()
                 self.distances_from_depth_image(obstacle_line_height,
                                                 depth_mat)
+
+                self.populate_obstacle_coordinates_from_depth_image(depth_mat)
 
                 if self.RTSP_STREAMING_ENABLE is True:
                     color_frame = frames.get_color_frame()
