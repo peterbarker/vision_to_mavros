@@ -248,20 +248,17 @@ class D4XXToMAVLink(object):
 
     # https://mavlink.io/en/messages/common.html#DISTANCE_SENSOR
     def send_distance_sensor_message(self):
-        # Average out a portion of the centermost part
+        time_boot_ms = int((self.frame_time - self.system_start_time)*1000)
+        if time_boot_ms == self.distance_sensor.time_boot_ms:
+            # no new frame
+            return
+
+        self.distance_sensor.time_boot_ms = time_boot_ms
+
         curr_dist = int(np.mean(self.distances[33:38]))
-        min_depth_cm = int(self.parameters["DEPTH_MIN"] * 100)
-        max_depth_cm = int(self.parameters["DEPTH_MAX"] * 100)
-        self.conn.mav.distance_sensor_send(
-            0,  # ms Timestamp (UNIX time or time since system boot)
-            min_depth_cm,   # min_distance, uint16_t, cm
-            max_depth_cm,   # min_distance, uint16_t, cm
-            curr_dist,      # current_distance,	uint16_t, cm
-            0,	            # type : 0 (ignored)
-            0,              # id : 0 (ignored)
-            int(self.camera_facing_angle_degree / 45),  # orientation
-            0               # covariance : 0 (ignored)
-        )
+        self.distance_sensor.current_distance = curr_dist
+
+        self.conn.mav.send(self.distance_sensor)
 
     def send_msg_to_gcs(self, text_to_be_sent):
         text_msg = 'D4xx: ' + text_to_be_sent
@@ -551,6 +548,18 @@ class D4XXToMAVLink(object):
                       (angle_offset,
                        angle_offset + increment_f *
                        self.distances_array_length))
+
+        self.distance_sensor = self.conn.mav.distance_sensor_encode(
+            0,  # ms Timestamp (UNIX time or time since system boot)
+            min_depth_cm,   # min_distance, uint16_t, cm
+            max_depth_cm,   # min_distance, uint16_t, cm
+            0,              # current_distance,	uint16_t, cm
+            0,	            # type : 0 (ignored)
+            0,              # id : 0 (ignored)
+            int(self.camera_facing_angle_degree / 45),  # orientation
+            0               # covariance : 0 (ignored)
+        )
+        self.progress("INFO: %s" % str(self.distance_sensor))
 
     # Find height of the horizontal line to calculate the obstacle distances
     #   - Basis: depth camera's vertical FOV, user's input
