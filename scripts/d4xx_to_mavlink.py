@@ -655,13 +655,18 @@ class D4XXToMAVLink(object):
 
     # @njit Uncomment to optimize for performance. This uses numba
     # which requires llmvlite (see instruction at the top)
-    def distances_from_depth_image(self, obstacle_line_height, depth_mat):
+    def distances_from_depth_image(self,
+                                   filtered_frame,
+                                   depth_frame,
+                                   depth_mat):
         # Parameters for depth image
         depth_img_width = depth_mat.shape[1]
         depth_img_height = depth_mat.shape[0]
 
         # Parameters for obstacle distance message
         step = depth_img_width / self.distances_array_length
+
+        obstacle_line_height = self.find_obstacle_line_height()
 
         for i in range(self.distances_array_length):
             # Each range (left to right) is found from a set of rows
@@ -704,6 +709,62 @@ class D4XXToMAVLink(object):
             if (dist_m > self.parameters["DEPTH_MIN"] and
                     dist_m < self.parameters["DEPTH_MAX"]):
                 self.distances[i] = dist_m * 100
+
+            if self.debug_enable:
+                self.display_obstacle_distance_debug(filtered_frame,
+                                                     depth_frame,
+                                                     obstacle_line_height)
+
+    def display_obstacle_distance_debug(self,
+                                        filtered_frame,
+                                        depth_frame,
+                                        obstacle_line_height):
+        '''Opens a GUI window display diagnostic data for OBSTACLE_DISTANCE
+        data'''
+        input_image = np.asanyarray(
+            self.colorizer.colorize(depth_frame).get_data())
+        output_image = np.asanyarray(
+            self.colorizer.colorize(filtered_frame).get_data())
+
+        # Draw a horizontal line to visualize the obstacles' line
+        x1, y1 = int(0), int(obstacle_line_height)
+        x2, y2 = int(self.DEPTH_WIDTH), int(obstacle_line_height)
+        line_thickness = self.obstacle_line_thickness_pixel
+        cv2.line(output_image,
+                 (x1, y1),
+                 (x2, y2),
+                 (0, 255, 0),
+                 thickness=line_thickness)
+        display_image = np.hstack(
+            (input_image,
+             cv2.resize(output_image,
+                        (self.DEPTH_WIDTH, self.DEPTH_HEIGHT))))
+
+        # Put the fps in the corner of the image
+        processing_speed = 1 / (time.time() - self.last_time)
+        text = ("%0.2f" % (processing_speed,)) + ' fps'
+        textsize = cv2.getTextSize(text,
+                                   cv2.FONT_HERSHEY_SIMPLEX,
+                                   1,
+                                   2)[0]
+        cv2.putText(
+            display_image,
+            text,
+            org=(int((display_image.shape[1] - textsize[0]/2)),
+                 int((textsize[1])/2)),
+            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+            fontScale=0.5,
+            thickness=1,
+            color=(255, 255, 255))
+
+        # Show the images
+        cv2.imshow(self.display_name, display_image)
+        cv2.waitKey(1)
+
+        # Print all the distances in a line
+        self.progress("%s" % (str(self.distances)))
+
+        self.last_time = time.time()
 
     def populate_obstacle_coordinates_from_depth_image(self, depth_mat):
         '''populates self.obstacle_coordinates based on depth_mat'''
@@ -997,7 +1058,7 @@ class D4XXToMAVLink(object):
         self.main_loop_should_quit = False
 
         # Begin of the main loop
-        last_time = time.time()
+        self.last_time = time.time()
         try:
             while not self.main_loop_should_quit:
                 # This call waits until a new coherent set of frames
@@ -1027,9 +1088,10 @@ class D4XXToMAVLink(object):
                 depth_mat = np.asanyarray(depth_data)
 
                 # Create obstacle distance data from depth image
-                obstacle_line_height = self.find_obstacle_line_height()
-                self.distances_from_depth_image(obstacle_line_height,
-                                                depth_mat)
+                self.distances_from_depth_image(
+                    filtered_frame,
+                    depth_frame,
+                    depth_mat)
 
                 self.populate_obstacle_coordinates_from_depth_image(depth_mat)
 
@@ -1037,53 +1099,6 @@ class D4XXToMAVLink(object):
                     color_frame = frames.get_color_frame()
                     color_image = np.asanyarray(color_frame.get_data())
                     self.gstserver.set_frame(color_image)
-
-                if self.debug_enable:
-                    # Prepare the data
-                    input_image = np.asanyarray(
-                        self.colorizer.colorize(depth_frame).get_data())
-                    output_image = np.asanyarray(
-                        self.colorizer.colorize(filtered_frame).get_data())
-
-                    # Draw a horizontal line to visualize the obstacles' line
-                    x1, y1 = int(0), int(obstacle_line_height)
-                    x2, y2 = int(self.DEPTH_WIDTH), int(obstacle_line_height)
-                    line_thickness = self.obstacle_line_thickness_pixel
-                    cv2.line(output_image,
-                             (x1, y1),
-                             (x2, y2),
-                             (0, 255, 0),
-                             thickness=line_thickness)
-                    display_image = np.hstack(
-                        (input_image,
-                         cv2.resize(output_image,
-                                    (self.DEPTH_WIDTH, self.DEPTH_HEIGHT))))
-
-                    # Put the fps in the corner of the image
-                    processing_speed = 1 / (time.time() - last_time)
-                    text = ("%0.2f" % (processing_speed,)) + ' fps'
-                    textsize = cv2.getTextSize(text,
-                                               cv2.FONT_HERSHEY_SIMPLEX,
-                                               1,
-                                               2)[0]
-                    cv2.putText(
-                        display_image,
-                        text,
-                        org=(int((display_image.shape[1] - textsize[0]/2)),
-                             int((textsize[1])/2)),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.5,
-                        thickness=1,
-                        color=(255, 255, 255))
-
-                    # Show the images
-                    cv2.imshow(self.display_name, display_image)
-                    cv2.waitKey(1)
-
-                    # Print all the distances in a line
-                    self.progress("%s" % (str(self.distances)))
-
-                    last_time = time.time()
 
         except Exception as e:
             self.progress("Exception caught")
