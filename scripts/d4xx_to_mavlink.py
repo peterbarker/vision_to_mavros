@@ -64,6 +64,9 @@ class D4XXToMAVLink(object):
     '''Sources data from an Intel RealSense D4xx series camera and sends
     mavlink messages based on that'''
 
+    def quit(self):
+        self.main_loop_should_quit = True
+
     class StreamDef(object):
         def __init__(self, type, format, width, height, fps):
             self.type = type
@@ -157,11 +160,6 @@ class D4XXToMAVLink(object):
 
         # lock for thread synchronization
         self.lock = threading.Lock()
-
-        # default exit code is failure - a graceful termination with a
-        # terminate signal is possible.
-        global exit_code
-        exit_code = 1
 
         # Camera-related variables
         self.pipe = None
@@ -807,29 +805,12 @@ class D4XXToMAVLink(object):
 
         sched.start()
 
-        # gracefully terminate the script if an interrupt signal (e.g. ctrl-c)
-        # is received.  This is considered to be abnormal termination.
-        main_loop_should_quit = False
-
-        def sigint_handler(sig, frame):
-            global main_loop_should_quit
-            main_loop_should_quit = True
-        signal.signal(signal.SIGINT, sigint_handler)
-
-        # gracefully terminate the script if a terminate signal is received
-        # (e.g. kill -TERM).
-        def sigterm_handler(sig, frame):
-            global main_loop_should_quit
-            main_loop_should_quit = True
-            global exit_code
-            exit_code = 0
-
-        signal.signal(signal.SIGTERM, sigterm_handler)
+        self.main_loop_should_quit = False
 
         # Begin of the main loop
         last_time = time.time()
         try:
-            while not main_loop_should_quit:
+            while not self.main_loop_should_quit:
                 # This call waits until a new coherent set of frames
                 # is available on a device.  Calls to
                 # get_frame_data(...) and get_frame_timestamp(...) on
@@ -930,8 +911,6 @@ class D4XXToMAVLink(object):
             self.mavlink_thread.join()
             self.conn.close()
             self.progress("INFO: Realsense pipe and vehicle object closed.")
-            global exit_code
-            sys.exit(exit_code)
 
 
 if __name__ == '__main__':
@@ -962,4 +941,24 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     d4xx_to_mavlink = D4XXToMAVLink(args)
+
+    # default exit code is failure - a graceful termination with a
+    # terminate signal is possible.
+    global exit_code
+    exit_code = 1
+
+    def sigint_handler(sig, frame):
+        global d4xx_to_mavlink
+        d4xx_to_mavlink.quit()
+    signal.signal(signal.SIGINT, sigint_handler)
+
+    def sigterm_handler(sig, frame):
+        global d4xx_to_mavlink
+        d4xx_to_mavlink.quit()
+        global exit_code
+        exit_code = 0
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
     d4xx_to_mavlink.run()
+
+    sys.exit(exit_code)
