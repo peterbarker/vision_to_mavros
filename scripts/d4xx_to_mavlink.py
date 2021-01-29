@@ -26,6 +26,7 @@
 '''
 
 import argparse
+import json
 import math as m
 import numpy as np
 import os
@@ -75,9 +76,12 @@ class D4XXToMAVLink(object):
 
         self.connection_string = args.connect
         self.connection_baudrate = args.baudrate
-        self.obstacle_distance_msg_hz = args.obstacle_distance_msg_hz
+        if args.obstacle_distance_msg_hz is not None:
+            value = float(args.obstacle_distance_msg_hz)
+            self.parameters["SR_OBS_DIS"] = value
         self.debug_enable = args.debug_enable
         self.camera_name = args.camera_name
+        self.parameter_file = args.parameter_file
 
         self.stream_def_depth = D4XXToMAVLink.StreamDef(
             type=rs.stream.depth,
@@ -93,6 +97,14 @@ class D4XXToMAVLink(object):
             480,
             30,
         )
+
+        # parameters and their default values; note 16 char limit!
+        self.parameters = {
+            "SR_OBS_DIS": 15,
+            "SR_DIS_SENS": 0,
+        }
+        self.load_parameters()
+
         self.DEPTH_MIN = 0.1
         self.DEPTH_MAX = 8.0
 
@@ -142,10 +154,6 @@ class D4XXToMAVLink(object):
         # Use this to rotate all processed data
         self.camera_facing_angle_degree = 0
 
-        # Enable/disable each message/function individually
-        self.enable_msg_obstacle_distance = True
-        self.enable_msg_distance_sensor = False
-
         # lock for thread synchronization
         self.lock = threading.Lock()
 
@@ -182,8 +190,7 @@ class D4XXToMAVLink(object):
                       self.connection_string)
         self.progress("INFO: Using connection_baudrate %s" %
                       self.connection_baudrate)
-        self.progress("INFO: Using obstacle_distance_msg_hz %s" %
-                      self.obstacle_distance_msg_hz)
+        self.progress("INFO: Parameters: (%s)" % self.parameters)
 
         # The list of filters to be applied on the depth image
         for i in range(len(self.filters)):
@@ -197,6 +204,8 @@ class D4XXToMAVLink(object):
             cv2.namedWindow(self.display_name, cv2.WINDOW_AUTOSIZE)
         else:
             self.progress("INFO: Debugging option DISABLED")
+
+        self.heartbeat_count = 0
 
     def progress(self, string):
         print(string, file=sys.stdout)
@@ -272,6 +281,82 @@ class D4XXToMAVLink(object):
         if self.debug_enable:
             self.progress("INFO: ATTITUDE: pitch=%.2f degrees" %
                           (m.degrees(self.vehicle_pitch_rad),))
+
+    def heartbeat_msg_callback(self, value):
+        '''handle HEARTBEAT messages'''
+        self.heartbeat_count += 1
+
+    '''
+    parameter handling
+    '''
+    def load_parameters(self):
+        if self.parameter_file is None:
+            return
+        if not os.path.isfile(self.parameter_file):
+            return
+        with open(self.parameter_file) as f:
+            x = f.read()
+        self.parameters = json.loads(x)
+
+    def persist_parameters(self):
+        if self.parameter_file is None:
+            return
+        tmp = self.parameter_file + "-tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps(self.parameters))
+        os.rename(tmp, self.parameter_file)
+
+    def param_request_list_msg_callback(self, msg):
+        '''handle PARAM_REQUEST_LIST messages'''
+        if msg.target_system != self.conn.source_system:
+            return
+        if msg.target_component != self.conn.source_component:
+            return
+        # just spew all parameters instantly; when we get a *lot* of
+        # messages this may need to be fixed.
+        count = 0
+        for name in sorted(self.parameters.keys()):
+            self.emit_param_value(name, index=count)
+            count += 1
+
+    def param_request_read_msg_callback(self, msg):
+        '''handle PARAM_REQUEST_READ messages'''
+        if msg.target_system != self.conn.source_system:
+            return
+        if msg.target_component != self.conn.source_component:
+            return
+        name = msg.param_id
+        if name not in self.parameters:
+            return
+
+    def emit_param_value(self, name, index=65535):
+        self.conn.mav.param_value_send(
+            bytes(name, "ascii"),
+            self.parameters[name],
+            mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            len(self.parameters.keys()),
+            index
+        )
+
+    def param_set_msg_callback(self, msg):
+        '''handle PARAM_SET messages'''
+        if msg.target_system != self.conn.source_system:
+            return
+        if msg.target_component != self.conn.source_component:
+            return
+
+        name = msg.param_id
+        if type(name) == bytes:
+            name = name.decode('ascii')
+
+        if name not in self.parameters:
+            return
+
+        self.parameters[name] = msg.param_value
+        # emit the new parameter value per spec
+        self.emit_param_value(name)
+
+        self.persist_parameters()
 
     # Listen to AHRS2 data:
     # https://mavlink.io/en/messages/ardupilotmega.html#AHRS2
@@ -612,6 +697,12 @@ class D4XXToMAVLink(object):
             local_ip_address = socket.gethostbyname(socket.gethostname())
         return local_ip_address
 
+    def wait_heartbeat(self):
+        self.progress("INFO: Waiting for heartbeat from autopilot")
+        count = self.heartbeat_count
+        while count == self.heartbeat_count:
+            time.sleep(0.1)
+
     def run(self):
         try:
             # Note: 'version' attribute is supported from pyrealsense2
@@ -633,7 +724,11 @@ class D4XXToMAVLink(object):
             force_connected=True,
         )
         mavlink_callbacks = {
+            'HEARTBEAT': self.heartbeat_msg_callback,
             'ATTITUDE': self.att_msg_callback,
+            'PARAM_SET': self.param_set_msg_callback,
+            'PARAM_REQUEST_READ': self.param_request_read_msg_callback,
+            'PARAM_REQUEST_LIST': self.param_request_list_msg_callback,
         }
         self.conn.mavlink_thread_should_exit = False
         self.mavlink_thread = threading.Thread(
@@ -641,6 +736,9 @@ class D4XXToMAVLink(object):
             args=(self.conn, mavlink_callbacks),
         )
         self.mavlink_thread.start()
+
+        # we can't encode messages until we see a heartbeat:
+        self.wait_heartbeat()
 
         # connecting and configuring the camera is a little hit-and-miss.
         # Start a timer and rely on a restart of the script to get it working.
@@ -665,26 +763,26 @@ class D4XXToMAVLink(object):
         # Send MAVlink messages in the background at pre-determined frequencies
         sched = BackgroundScheduler()
 
-        if self.enable_msg_obstacle_distance:
+        msgs = [
+            ("SR_OBS_DIS",
+             "OBSTACLE_DISTANCE",
+             self.send_obstacle_distance_message),
+            ("SR_DIS_SENS",
+             "DISTANCE_SENSOR",
+             self.send_distance_sensor_message),
+        ]
+        for (param_name, msg_name, callback) in iter(msgs):
+            rate = self.parameters[param_name]
+            if rate == 0:
+                continue
+
             sched.add_job(
-                self.send_obstacle_distance_message,
+                callback,
                 'interval',
-                seconds=1/self.obstacle_distance_msg_hz,
+                seconds=1/rate,
             )
-            self.send_msg_to_gcs('Sending obstacle distance messages to FCU')
-        elif self.enable_msg_distance_sensor:
-            sched.add_job(
-                self.send_distance_sensor_message,
-                'interval',
-                seconds=1/self.obstacle_distance_msg_hz,
-            )
-            self.send_msg_to_gcs('Sending distance sensor messages to FCU')
-        else:
-            self.send_msg_to_gcs('Nothing to do. Check params')
-            self.pipe.stop()
-            self.conn.mav.close()
-            self.progress("INFO: Realsense pipe and vehicle object closed.")
-            sys.exit()
+            self.send_msg_to_gcs('Sending %s messages to FCU @%fHz' %
+                                 (msg_name, rate))
 
         glib_loop = None
         if self.RTSP_STREAMING_ENABLE is True:
@@ -840,12 +938,16 @@ if __name__ == '__main__':
     parser.add_argument('--connect',
                         help="Vehicle connection target string",
                         default='/dev/ttyUSB0')
+    parser.add_argument('--parameter-file',
+                        help="Path to file to persist parameters",
+                        default=None)
     parser.add_argument('--baudrate', type=int,
                         help="Vehicle connection baudrate",
                         default=921600)
     parser.add_argument('--obstacle_distance_msg_hz', type=float,
-                        help="Update frequency for OBSTACLE_DISTANCE message",
-                        default=15.0)
+                        help="Update frequency for OBSTACLE_DISTANCE message. "
+                        "Updates and overrides persistent parameter",
+                        default=None)
     parser.add_argument('--debug_enable', type=bool,
                         help="Enable debugging information",
                         default=False)
