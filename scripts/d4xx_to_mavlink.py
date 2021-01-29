@@ -286,6 +286,25 @@ class D4XXToMAVLink(object):
         '''handle HEARTBEAT messages'''
         self.heartbeat_count += 1
 
+    def handle_cmd_preflight_reboot_shutdown(self, msg):
+        if msg.param1 == 1 or msg.param1 == 3:
+            global main_loop_should_quit
+            self.quit()
+            return mavutil.mavlink.MAV_RESULT_ACCEPTED
+        return mavutil.mavlink.MAV_RESULT_DENIED
+
+    def command_long_msg_callback(self, msg):
+        '''handle COMMAND_LONG messages'''
+        if msg.target_system != self.conn.source_system:
+            return
+        if msg.target_component != self.conn.source_component:
+            return
+        result = mavutil.mavlink.MAV_RESULT_UNSUPPORTED
+        self.progress("INFO: handling (%s)" % str(msg))
+        if msg.command == mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN:
+            result = self.handle_cmd_preflight_reboot_shutdown(msg)
+        self.conn.mav.command_ack_send(msg.command, result)
+
     '''
     parameter handling
     '''
@@ -732,6 +751,7 @@ class D4XXToMAVLink(object):
             'PARAM_SET': self.param_set_msg_callback,
             'PARAM_REQUEST_READ': self.param_request_read_msg_callback,
             'PARAM_REQUEST_LIST': self.param_request_list_msg_callback,
+            'COMMAND_LONG': self.command_long_msg_callback,
         }
         self.conn.mavlink_thread_should_exit = False
         self.mavlink_thread = threading.Thread(
