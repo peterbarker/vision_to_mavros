@@ -61,6 +61,117 @@ gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GstRtspServer, GLib  # noqa
 
 
+class DebugObstacleDistance3D(object):
+    def __init__(self, parameters):
+        self.parameters = parameters
+        self.colorizer = rs.colorizer()
+        self.display_name = 'OBSTACLE_DISTANCE_3D Debug'
+        self.last_time = time.time()
+
+    def init(self):
+        cv2.namedWindow(self.display_name, cv2.WINDOW_AUTOSIZE)
+
+    def run(self,
+            color_frame,
+            filtered_frame,
+            depth_frame,
+            depth_mat,
+            pixel_depths,
+            obstacle_coordinates,
+            rows,
+            columns):
+
+        ''' display a horizontal stack of the input and filtered image, adding
+        a grid, grid-section distances and framerate
+        '''
+        # Prepare the data
+        input_image = np.asanyarray(self.colorizer.colorize(depth_frame).get_data())  # noqa
+        output_image = np.asanyarray(self.colorizer.colorize(filtered_frame).get_data())  # noqa
+
+        # divide view into n*m matrix
+        pxstep = int(depth_mat.shape[1]/columns)
+        pystep = int(depth_mat.shape[0]/rows)
+        for gx in range(pxstep, columns*pxstep, pxstep):
+            cv2.line(
+                output_image,
+                (gx, 0),
+                (gx, depth_mat.shape[0]),
+                color=(0, 0, 0),
+                thickness=1
+            )
+        for gy in range(pystep, columns*pystep, pystep):
+            cv2.line(
+                output_image,
+                (0, gy),
+                (depth_mat.shape[0], gy),
+                color=(0, 0, 0),
+                thickness=1
+            )
+
+        # plot distances in:
+        count = 0
+        for r in pixel_depths:
+            for c in r:
+                (y, x, d) = c
+                if d >= self.parameters["DEPTH_MAX"]:
+                    continue
+                cv2.circle(
+                    output_image,
+                    (int(x), int(y)),
+                    5,  # radius in pixels
+                    (0, 0, 255),  # colour BGR
+                    1,  # line thickness
+                )
+                cv2.putText(
+                    output_image,
+                    "%0.2f" % round(d, 2),
+                    (int(pxstep*(1/4 + count % columns)),
+                     int(pystep*(1/3 + m.floor(count/rows)))),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.75,
+                    (0, 0, 255),
+                    2)
+                count += 1
+
+        display_image = np.hstack(
+            (input_image,
+             cv2.resize(output_image,
+                        (depth_frame.get_width(), depth_frame.get_height())))
+        )
+
+        # Put the fps in the corner of the image
+        processing_speed = 1 / (time.time() - self.last_time)
+        self.last_time = time.time()
+        text = ("%0.2f" % (processing_speed,)) + ' fps'
+        textsize = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+        cv2.putText(
+            display_image,
+            text,
+            org=(int((display_image.shape[1] - textsize[0]/2)),
+                 int((textsize[1])/2)),
+            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+            fontScale=0.5,
+            thickness=1,
+            color=(255, 255, 255))
+
+        # Show the images
+        cv2.imshow(self.display_name, display_image)
+        cv2.waitKey(1)
+
+
+class DebugShowColorFrame(object):
+    def __init__(self):
+        self.display_name = 'ColoredFrame'
+
+    def init(self):
+        cv2.namedWindow(self.display_name, cv2.WINDOW_AUTOSIZE)
+
+    def run(self, color_frame):
+        ''' display the color image from the camera '''
+        color_image = np.asanyarray(color_frame.get_data())
+        cv2.imshow(self.display_name, color_image)
+
+
 class D4XXToMAVLink(object):
     '''Sources data from an Intel RealSense D4xx series camera and sends
     mavlink messages based on that'''
@@ -84,6 +195,7 @@ class D4XXToMAVLink(object):
             value = float(args.obstacle_distance_msg_hz)
             self.parameters["SR_OBS_DIS"] = value
         self.debug_enable = args.debug_enable
+
         self.camera_name = args.camera_name
         self.parameter_file = args.parameter_file
 
@@ -113,6 +225,14 @@ class D4XXToMAVLink(object):
             "DEPTH_MAX": 8.0,
         }
         self.load_parameters()
+
+        self.debug_obstacle_distance_3d = None
+        if args.debug_enable_obstacle_distance_3d:
+            self.debug_obstacle_distance_3d = DebugObstacleDistance3D(
+                self.parameters
+            )
+
+        self.debug_show_color_frame = DebugShowColorFrame()
 
         # The height of the horizontal line to find distance to
         # obstacle.  [0-1]: 0-Top, 1-Bottom.
@@ -520,7 +640,8 @@ class D4XXToMAVLink(object):
         config.enable_device(dev.get_info(rs.camera_info.serial_number))
 
         all_streams = [self.stream_def_depth]
-        if self.RTSP_STREAMING_ENABLE is True:
+        if (self.RTSP_STREAMING_ENABLE is True or
+                self.debug_obstacle_distance_3d is not None):
             all_streams.append(self.stream_def_color)
 
         for stream in all_streams:
@@ -767,7 +888,11 @@ class D4XXToMAVLink(object):
 
         self.last_time = time.time()
 
-    def populate_obstacle_coordinates_from_depth_image(self, depth_mat):
+    def populate_obstacle_coordinates_from_depth_image(self,
+                                                       color_frame,
+                                                       filtered_frame,
+                                                       depth_frame,
+                                                       depth_mat):
         '''populates self.obstacle_coordinates based on depth_mat'''
 
         # roughly:
@@ -820,8 +945,6 @@ class D4XXToMAVLink(object):
 #                          (y, margin_y, sy, y_pixel))
                     for sx in range(0, grid_partition_x, step_x):
                         x_pixel = x + margin_x + sx
-#                        print("  x=%u margin_x=%u sx=%u x_pixel=%u" %
-#                              (x, margin_x, sx, x_pixel))
                         point_depth = depth_mat[y_pixel, x_pixel]
                         point_depth *= self.depth_scale
 #                            print("  x=%u margin_x=%u"
@@ -847,6 +970,18 @@ class D4XXToMAVLink(object):
                     coordinates = self.pixel_to_xyz(c)
                     self.obstacle_coordinates[count] = coordinates
                 count += 1
+
+        if self.debug_obstacle_distance_3d is not None:
+            self.debug_show_color_frame.run(color_frame)
+            self.debug_obstacle_distance_3d.run(
+                color_frame,
+                filtered_frame,
+                depth_frame,
+                depth_mat,
+                pixel_depths,
+                self.obstacle_coordinates,
+                rows,
+                columns)
 
     def pixel_to_xyz(self, depth_pixel):
         depth_intrinsics = self.stream_def_depth.intrinsics
@@ -961,6 +1096,10 @@ class D4XXToMAVLink(object):
         except Exception:
             # fail silently
             pass
+
+        if self.debug_obstacle_distance_3d is not None:
+            self.debug_obstacle_distance_3d.init()
+            self.debug_show_color_frame.init()
 
         self.progress("INFO: Starting Vehicle communications")
         # Set MAVLink protocol to 2.
@@ -1094,7 +1233,12 @@ class D4XXToMAVLink(object):
                     depth_frame,
                     depth_mat)
 
-                self.populate_obstacle_coordinates_from_depth_image(depth_mat)
+                self.populate_obstacle_coordinates_from_depth_image(
+                    frames.get_color_frame(),
+                    filtered_frame,
+                    depth_frame,
+                    depth_mat
+                )
 
                 if self.RTSP_STREAMING_ENABLE is True:
                     color_frame = frames.get_color_frame()
@@ -1139,6 +1283,9 @@ if __name__ == '__main__':
                         "Updates and overrides persistent parameter",
                         default=None)
     parser.add_argument('--debug_enable', type=bool,
+                        help="Enable debugging information",
+                        default=False)
+    parser.add_argument('--debug_enable-obstacle-distance-3d', type=bool,
                         help="Enable debugging information",
                         default=False)
     parser.add_argument('--camera_name', type=str,
