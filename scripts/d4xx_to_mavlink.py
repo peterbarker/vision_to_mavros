@@ -762,7 +762,8 @@ class D4XXToMAVLink(object):
         cv2.waitKey(1)
 
         # Print all the distances in a line
-        self.progress("%s" % (str(self.distances)))
+        #        self.progress("%s" %
+        # (["-" if x == 65535 else x for x in self.distances]))
 
         self.last_time = time.time()
 
