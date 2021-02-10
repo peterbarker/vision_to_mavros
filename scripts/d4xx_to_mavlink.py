@@ -224,6 +224,7 @@ class D4XXToMAVLink(object):
             "SR_DIS_SENS": 0,
             "DEPTH_MIN": 0.1,
             "DEPTH_MAX": 8.0,
+            "RTSP_PORT_COL": 8554,  # stream colour image port
         }
         self.load_parameters()
 
@@ -247,8 +248,6 @@ class D4XXToMAVLink(object):
         self.USE_PRESET_FILE = True
         self.PRESET_FILE = "../cfg/d4xx-default.json"
 
-        self.RTSP_STREAMING_ENABLE = True
-        self.RTSP_PORT = "8554"
         self.RTSP_MOUNT_POINT = "/d4xx"
 
         # List of filters to be applied, in this order.
@@ -648,7 +647,7 @@ class D4XXToMAVLink(object):
         config.enable_device(dev.get_info(rs.camera_info.serial_number))
 
         all_streams = [self.stream_def_depth]
-        if (self.RTSP_STREAMING_ENABLE is True or
+        if (self.parameters["RTSP_PORT_COL"] > 0 or
                 self.debug_obstacle_distance_3d is not None):
             all_streams.append(self.stream_def_color)
 
@@ -1063,8 +1062,15 @@ class D4XXToMAVLink(object):
             appsrc.connect('need-data', self.on_need_data)
 
     class GstServer(GstRtspServer.RTSPServer):
-        def __init__(self, mount_point, width, height, fps, **properties):
+        def __init__(self,
+                     port,
+                     mount_point,
+                     width,
+                     height,
+                     fps,
+                     **properties):
             super(D4XXToMAVLink.GstServer, self).__init__(**properties)
+            self.set_service(port)
             self.factory = D4XXToMAVLink.SensorFactory(width, height, fps)
             self.factory.set_shared(True)
             self.get_mount_points().add_factory(mount_point, self.factory)
@@ -1186,11 +1192,14 @@ class D4XXToMAVLink(object):
                                  (msg_name, rate))
 
         glib_loop = None
-        if self.RTSP_STREAMING_ENABLE is True:
+        self.gstserver = None
+        if self.parameters["RTSP_PORT_COL"] > 0:
             self.send_msg_to_gcs('RTSP at rtsp://' + self.get_local_ip() +
-                                 ':' + self.RTSP_PORT + self.RTSP_MOUNT_POINT)
+                                 ':' + self.parameters["RTSP_PORT_COL"] +
+                                 self.RTSP_MOUNT_POINT)
             Gst.init(None)
             self.gstserver = D4XXToMAVLink.GstServer(
+                self.parameters["RTSP_PORT_COL"],
                 self.RTSP_MOUNT_POINT,
                 self.stream_def_color.intrinsics.width,
                 self.stream_def_color.intrinsics.height,
@@ -1248,7 +1257,7 @@ class D4XXToMAVLink(object):
                     depth_mat
                 )
 
-                if self.RTSP_STREAMING_ENABLE is True:
+                if self.gstserver is not None:
                     color_frame = frames.get_color_frame()
                     color_image = np.asanyarray(color_frame.get_data())
                     self.gstserver.set_frame(color_image)
