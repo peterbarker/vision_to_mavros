@@ -32,6 +32,7 @@ import numpy as np
 import os
 import signal
 import socket
+import struct
 import sys
 import threading
 import traceback
@@ -367,6 +368,10 @@ class D4XXToMAVLink(object):
 
     # https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
     def send_obstacle_distance_message(self):
+        if self.current_time_us == 0:
+            # no data from camera yet
+            return
+
         if self.current_time_us == self.obstacle_distance.time_usec:
             # no new frame
             return
@@ -376,6 +381,9 @@ class D4XXToMAVLink(object):
 
     # https://mavlink.io/en/messages/common.html#DISTANCE_SENSOR
     def send_distance_sensor_message(self):
+        if self.frame_time == 0:
+            # no data from camera yet
+            return
         time_boot_ms = int((self.frame_time - self.system_start_time)*1000)
         if time_boot_ms == self.distance_sensor.time_boot_ms:
             # no new frame
