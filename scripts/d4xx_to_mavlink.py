@@ -396,6 +396,34 @@ class D4XXToMAVLink(object):
         self.conn.mav.send(self.distance_sensor)
 
     def send_obstacle_distance_3d_message(self):
+        '''send an entire set of OBSTACLE_DISTANCE_3D messages'''
+        if self.frame_time == 0:
+            # no data from camera yet
+            return
+        time_boot_ms = int((self.frame_time - self.system_start_time)*1000)
+
+        if time_boot_ms == self.obstacle_distance_3d.time_boot_ms:
+            # no new frame
+            return
+
+        self.obstacle_distance_3d.time_boot_ms = time_boot_ms
+
+        for i in range(len(self.obstacle_coordinates)):
+            obs = self.obstacle_coordinates[i]
+
+            self.obstacle_distance_3d.obstacle_id = i
+            self.obstacle_distance_3d.x = obs[0]
+            self.obstacle_distance_3d.y = obs[1]
+            self.obstacle_distance_3d.z = obs[2]
+
+            try:
+                self.conn.mav.send(self.obstacle_distance_3d)
+            except struct.error:
+                self.progress("ERROR: failed to send (%s)" %
+                              (str(self.obstacle_distance_3d),))
+
+    def send_obstacle_distance_3d_message_one(self):
+        '''send the next obstacle_distance_3d message'''
         if self.frame_time == 0:
             # no data from camera yet
             return
@@ -1180,6 +1208,12 @@ class D4XXToMAVLink(object):
         ]
         for (param_name, msg_name, callback) in iter(msgs):
             rate = self.parameters[param_name]
+            if param_name == "SR_OBS_DIS_3D":
+                # the scheduler has problems with very high rates.  So
+                # we send all of the obstacles in one hit, but to
+                # correct the stream rate we need to call the function
+                # less often:
+                rate /= len(self.obstacle_coordinates)
             if rate == 0:
                 continue
 
