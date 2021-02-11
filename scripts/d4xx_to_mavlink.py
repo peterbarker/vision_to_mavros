@@ -1028,6 +1028,7 @@ class D4XXToMAVLink(object):
                                         filtered_frame,
                                         depth_frame,
                                         obstacle_line_height):
+        return
         '''Opens a GUI window display diagnostic data for OBSTACLE_DISTANCE
         data'''
         input_image = np.asanyarray(
