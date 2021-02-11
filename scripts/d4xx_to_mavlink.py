@@ -190,6 +190,7 @@ class D4XXToMAVLink(object):
 
     def __init__(self, args):
 
+        self.do_list_cameras = args.list_cameras
         self.connection_string = args.connect
         self.connection_baudrate = args.baudrate
         if args.obstacle_distance_msg_hz is not None:
@@ -333,6 +334,23 @@ class D4XXToMAVLink(object):
             self.progress("INFO: Debugging option DISABLED")
 
         self.heartbeat_count = 0
+
+        self.DS5_ids = frozenset([
+            "0AD1",
+            "0AD2",
+            "0AD3",
+            "0AD4",
+            "0AD5",
+            "0AF6",
+            "0AFE",
+            "0AFF",
+            "0B00",
+            "0B01",
+            "0B03",
+            "0B07",
+            "0B3A",
+            "0B5C",
+        ])
 
     def progress(self, string):
         print(string, file=sys.stdout)
@@ -578,30 +596,42 @@ class D4XXToMAVLink(object):
     #  Functions - D4xx cameras                        ##
     #####################################################
 
+    def list_cameras(self):
+        for dev in rs.context().query_devices():
+            name = dev.get_info(rs.camera_info.name)
+            serial = dev.get_info(rs.camera_info.serial_number)
+
+            if not dev.supports(rs.camera_info.product_id):
+                supported_id = " UNSUPPORTED-ID"
+            else:
+                supported_id = ""
+
+            if not dev.supports(rs.camera_info.name):
+                supported_name = " UNSUPPORTED-NAME"
+            else:
+                supported_name = ""
+
+            if str(dev.get_info(rs.camera_info.product_id)) not in self.DS5_ids:  # noqa
+                advanced_mode = " NO-ADVANCED-MODE"
+            else:
+                advanced_mode = ""
+
+            print("%s serial=%s %s%s%s" % (
+                name,
+                serial,
+                supported_id,
+                supported_name,
+                advanced_mode
+            ))
+
     def find_device(self, require_advanced_mode=False):
-        DS5_ids = frozenset([
-            "0AD1",
-            "0AD2",
-            "0AD3",
-            "0AD4",
-            "0AD5",
-            "0AF6",
-            "0AFE",
-            "0AFF",
-            "0B00",
-            "0B01",
-            "0B03",
-            "0B07",
-            "0B3A",
-            "0B5C",
-        ])
         for dev in rs.context().query_devices():
             if not dev.supports(rs.camera_info.product_id):
                 continue
             if not dev.supports(rs.camera_info.name):
                 continue
             if require_advanced_mode:
-                if str(dev.get_info(rs.camera_info.product_id)) not in DS5_ids:
+                if str(dev.get_info(rs.camera_info.product_id)) not in self.DS5_ids:  # noqa
                     continue
             name = dev.get_info(rs.camera_info.name)
             if (self.camera_name is not None and
@@ -1139,6 +1169,12 @@ class D4XXToMAVLink(object):
             # fail silently
             pass
 
+        if self.do_list_cameras:
+            self.list_cameras()
+            global exit_code
+            exit_code = 0
+            return
+
         if self.debug_obstacle_distance_3d is not None:
             self.debug_obstacle_distance_3d.init()
             self.debug_show_color_frame.init()
@@ -1326,6 +1362,8 @@ if __name__ == '__main__':
     parser.add_argument('--parameter-file',
                         help="Path to file to persist parameters",
                         default=None)
+    parser.add_argument('--list-cameras',
+                        help="List cameras and exit")
     parser.add_argument('--baudrate', type=int,
                         help="Vehicle connection baudrate",
                         default=921600)
