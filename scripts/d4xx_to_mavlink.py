@@ -391,6 +391,7 @@ class D4XXToMAVLink(object):
 
     # https://mavlink.io/en/messages/common.html#DISTANCE_SENSOR
     def send_distance_sensor_message(self):
+        return
         if self.frame_time == 0:
             # no data from camera yet
             return
