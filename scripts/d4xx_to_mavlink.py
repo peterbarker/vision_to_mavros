@@ -40,6 +40,7 @@ import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from pymavlink import mavutil
+from pymavlink import mavextra
 # from numba import njit
 
 # Set the path for pyrealsense2.[].so
@@ -173,6 +174,15 @@ class DebugShowColorFrame(object):
         cv2.imshow(self.display_name, color_image)
 
 
+class Device(object):
+    def __init__(self, dev):
+        self.dev = dev
+
+        self.current_time_us = 0
+        self.frame_time = 0
+        self.obstacle_coordinates = np.ones((9, 3), dtype=np.float) * (9999)
+
+
 class D4XXToMAVLink(object):
     '''Sources data from an Intel RealSense D4xx series camera and sends
     mavlink messages based on that'''
@@ -191,6 +201,13 @@ class D4XXToMAVLink(object):
     def __init__(self, args):
 
         self.do_list_cameras = args.list_cameras
+
+        self.default_preset_file = getattr(args, "default_preset_file", None)
+        if self.default_preset_file is None:
+            self.default_preset_file = "../cfg/d4xx-default.json"
+
+        self.camera_config_filename = args.camera_config_filename
+
         self.connection_string = args.connect
         self.connection_baudrate = args.baudrate
         if args.obstacle_distance_msg_hz is not None:
@@ -203,21 +220,6 @@ class D4XXToMAVLink(object):
 
         self.system_start_time = time.time()
 
-        self.stream_def_depth = D4XXToMAVLink.StreamDef(
-            type=rs.stream.depth,
-            format=rs.format.z16,
-            width=640,
-            height=480,
-            fps=30,
-        )
-        self.stream_def_color = D4XXToMAVLink.StreamDef(
-            rs.stream.color,
-            rs.format.bgr8,
-            640,
-            480,
-            30,
-        )
-
         # parameters and their default values; note 16 char limit!
         self.parameters = {
             "SR_OBS_DIS": 15,
@@ -229,6 +231,16 @@ class D4XXToMAVLink(object):
         }
         self.load_parameters()
 
+        # load camera configuration
+        self.camera_config = {}
+        self.load_camera_config()
+        if len(self.camera_config.keys()) == 0:
+            self.progress("No keys")
+            self.camera_config = {
+                "version": 0.1,
+                "cameras": {},  # by serial number
+            }
+
         self.debug_obstacle_distance_3d = None
         if args.debug_enable_obstacle_distance_3d:
             self.debug_obstacle_distance_3d = DebugObstacleDistance3D(
@@ -236,18 +248,6 @@ class D4XXToMAVLink(object):
             )
 
         self.debug_show_color_frame = DebugShowColorFrame()
-
-        # The height of the horizontal line to find distance to
-        # obstacle.  [0-1]: 0-Top, 1-Bottom.
-        self.obstacle_line_height_ratio = 0.18
-        # Number of pixel rows to use to generate the obstacle
-        # distance message. For each column, the scan will return the
-        # minimum value for those pixels centered vertically in the
-        # image.  Range is [1-DEPTH_HEIGHT]
-        self.obstacle_line_thickness_pixel = 10
-
-        self.USE_PRESET_FILE = True
-        self.PRESET_FILE = "../cfg/d4xx-default.json"
 
         self.RTSP_MOUNT_POINT = "/d4xx"
 
@@ -280,39 +280,27 @@ class D4XXToMAVLink(object):
             filt.set_option(rs.option.max_distance,
                             self.parameters["DEPTH_MAX"])
 
-        # Use this to rotate all processed data
-        self.camera_facing_angle_degree = 0
-
         # lock for thread synchronization
         self.lock = threading.Lock()
 
         # Camera-related variables
-        self.pipe = None
-        self.depth_scale = 0
         self.colorizer = rs.colorizer()
-        self.depth_vfov_deg = None
 
         # The name of the display window
         self.display_name = 'Input/output depth'
 
         # Data variables
         self.vehicle_pitch_rad = None
-        self.current_time_us = 0
-        self.frame_time = 0
 
         # Obstacle distances in front of the sensor, starting from the
         # left in increment degrees to the right
         # See: https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
-
-        self.next_obstacle_coordinate = 0
 
         self.distances_array_length = 72
         self.angle_offset = None
         max_depth_cm = int(self.parameters["DEPTH_MAX"] * 100)
         self.distances = (np.ones((self.distances_array_length,),
                                   dtype=np.uint16) * (max_depth_cm + 1))
-
-        self.obstacle_coordinates = np.ones((9, 3), dtype=np.float) * (9999)
 
         self.progress("INFO: Using connection_string %s" %
                       self.connection_string)
@@ -385,16 +373,21 @@ class D4XXToMAVLink(object):
 
     # https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
     def send_obstacle_distance_message(self):
-        if self.current_time_us == 0:
+        for serial in self.devices:
+            self.send_obstacle_distance_message_for_device(
+                self.devices[serial])
+
+    def send_obstacle_distance_message_for_device(self, device):
+        if device.current_time_us == 0:
             # no data from camera yet
             return
 
-        if self.current_time_us == self.obstacle_distance.time_usec:
+        if device.current_time_us == device.obstacle_distance.time_usec:
             # no new frame
             return
-        self.obstacle_distance.time_usec = self.current_time_us
+        device.obstacle_distance.time_usec = device.current_time_us
 
-        self.conn.mav.send(self.obstacle_distance)
+        self.conn.mav.send(device.obstacle_distance)
 
     # https://mavlink.io/en/messages/common.html#DISTANCE_SENSOR
     def send_distance_sensor_message(self):
@@ -414,31 +407,41 @@ class D4XXToMAVLink(object):
         self.conn.mav.send(self.distance_sensor)
 
     def send_obstacle_distance_3d_message(self):
+        for serial in self.devices:
+            self.send_obstacle_distance_3d_message_for_serial(
+                serial)
+
+    def send_obstacle_distance_3d_message_for_serial(self, serial):
         '''send an entire set of OBSTACLE_DISTANCE_3D messages'''
-        if self.frame_time == 0:
+        device = self.devices[serial]
+        config = self.camera_config["cameras"][serial]
+
+        if device.frame_time == 0:
             # no data from camera yet
             return
-        time_boot_ms = int((self.frame_time - self.system_start_time)*1000)
+        time_boot_ms = int((device.frame_time - self.system_start_time)*1000)
 
-        if time_boot_ms == self.obstacle_distance_3d.time_boot_ms:
+        if time_boot_ms == device.obstacle_distance_3d.time_boot_ms:
             # no new frame
             return
 
-        self.obstacle_distance_3d.time_boot_ms = time_boot_ms
+        device.obstacle_distance_3d.time_boot_ms = time_boot_ms
 
-        for i in range(len(self.obstacle_coordinates)):
-            obs = self.obstacle_coordinates[i]
+        obs_offset = config["num"] * 9
 
-            self.obstacle_distance_3d.obstacle_id = i
-            self.obstacle_distance_3d.x = obs[0]
-            self.obstacle_distance_3d.y = obs[1]
-            self.obstacle_distance_3d.z = obs[2]
+        for i in range(len(device.obstacle_coordinates)):
+            obs = device.obstacle_coordinates[i]
+
+            device.obstacle_distance_3d.obstacle_id = i + obs_offset
+            device.obstacle_distance_3d.x = obs[0]
+            device.obstacle_distance_3d.y = obs[1]
+            device.obstacle_distance_3d.z = obs[2]
 
             try:
-                self.conn.mav.send(self.obstacle_distance_3d)
+                self.conn.mav.send(device.obstacle_distance_3d)
             except struct.error:
                 self.progress("ERROR: failed to send (%s)" %
-                              (str(self.obstacle_distance_3d),))
+                              (str(device.obstacle_distance_3d),))
 
     def send_obstacle_distance_3d_message_one(self):
         '''send the next obstacle_distance_3d message'''
@@ -511,6 +514,28 @@ class D4XXToMAVLink(object):
         if msg.command == mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN:
             result = self.handle_cmd_preflight_reboot_shutdown(msg)
         self.conn.mav.command_ack_send(msg.command, result)
+
+    '''
+    camera configuration
+    '''
+    def load_camera_config(self):
+        if self.camera_config_filename is None:
+            self.progress("No name")
+            return
+        if not os.path.isfile(self.camera_config_filename):
+            self.progress("No file")
+            return
+        with open(self.camera_config_filename) as f:
+            x = f.read()
+        self.camera_config = json.loads(x)
+
+    def persist_camera_config(self):
+        if self.camera_config_filename is None:
+            return
+        tmp = self.camera_config_filename + "-tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps(self.camera_config))
+        os.rename(tmp, self.camera_config_filename)
 
     '''
     parameter handling
@@ -655,11 +680,13 @@ class D4XXToMAVLink(object):
             advnc_mode = rs.rs400_advanced_mode(dev)
             if advnc_mode.is_enabled():
                 self.progress("INFO: Advanced mode is enabled")
+                self.devices[serial].dev = dev
                 return dev
 
             self.progress("INFO: Trying to enable advanced mode...")
 
             advnc_mode.toggle_advanced_mode(True)
+            self.devices[serial].dev = None
 
             # At this point the device will disconnect and re-connect.
             # Our existing "dev" will be stale.
@@ -689,37 +716,99 @@ class D4XXToMAVLink(object):
             stream_def.fps,
         )
 
-    # Establish connection to the Realsense camera
+    def enumerate_cameras(self):
+        config_changes_made = False
+        self.devices = {}
+        for dev in rs.context().query_devices():
+            name = dev.get_info(rs.camera_info.name)
+            if (self.camera_name is not None and
+                    self.camera_name.lower() != name.split()[2].lower()):
+                # user wants a specific camera, and this is not it
+                continue
+            serial = dev.get_info(rs.camera_info.serial_number)
+            if serial not in self.camera_config["cameras"]:
+
+                # find simple number to assign to the camera:
+                highest = -1
+                for sn in self.camera_config["cameras"]:
+                    if self.camera_config["cameras"][sn]["num"] > highest:
+                        highest = self.camera_config["cameras"][sn]["num"]
+
+                # obstacle-line-height-ratio is the height of the
+                # horizontal line to find distance to obstacle.
+
+                # obstacle-line-thickness is the number of pixel rows to
+                # use to generate the obstacle distance message. For
+                # each column, the scan will return the minimum value
+                # for those pixels centered vertically in the image.
+                # Range is [1-DEPTH_HEIGHT]
+
+                self.camera_config["cameras"][serial] = {
+                    "enabled": 1,
+                    "rotation": mavutil.mavlink.MAV_SENSOR_ROTATION_NONE,
+                    "presets-file": self.default_preset_file,
+                    "obstacle-line-height-ratio": 0.18,
+                    "obstacle-line-thickness": 10,
+                    "num": highest + 1,
+                }
+                config_changes_made = True
+            self.devices[serial] = Device(dev)
+        if config_changes_made:
+            self.persist_camera_config()
+
     def realsense_connect(self):
+        for serial in self.devices.keys():
+            self.send_msg_to_gcs('Connecting to camera (%s)...' % serial)
+            self.realsense_connect_device(serial)
+            self.send_msg_to_gcs('Camera connected.')
+
+    # Establish connection to the Realsense camera
+    def realsense_connect_device(self, serial):
         # we only require a device that does advanced mode if we're
         # passing in a preset file:
-        dev = self.find_device(require_advanced_mode=self.USE_PRESET_FILE)
+        dev = self.devices[serial].dev
+        config = self.camera_config["cameras"][serial]
 
-        if self.USE_PRESET_FILE:
+        if config["presets-file"]:
+            # we need advanced mode to use a presets file:
             dev = self.realsense_enable_advanced_mode(dev)
-            self.realsense_load_settings_file(dev, self.PRESET_FILE)
+            self.realsense_load_settings_file(dev, config["presets-file"])
 
         # Create configuration for image stream(s)
         config = rs.config()
         # connect to a specific device ID
-        config.enable_device(dev.get_info(rs.camera_info.serial_number))
+        config.enable_device(serial)
 
-        all_streams = [self.stream_def_depth]
+        self.devices[serial].all_streams = [
+            D4XXToMAVLink.StreamDef(
+                type=rs.stream.depth,
+                format=rs.format.z16,
+                width=640,
+                height=480,
+                fps=30,
+            ),
+        ]
         if (self.parameters["RTSP_PORT_COL"] > 0 or
                 self.debug_obstacle_distance_3d is not None):
-            all_streams.append(self.stream_def_color)
+            self.devices[serial].all_streams.append(D4XXToMAVLink.StreamDef(
+                rs.stream.color,
+                rs.format.bgr8,
+                640,
+                480,
+                30,
+            ))
 
-        for stream in all_streams:
+        for stream in self.devices[serial].all_streams:
             self.enable_stream_in_config(config, stream)
 
         # Declare RealSense pipe, encapsulating the actual device and sensors
-        self.pipe = rs.pipeline()
+        self.devices[serial].pipe = rs.pipeline()
 
         # Start streaming with requested config
-        profile = self.pipe.start(config)
+        profile = self.devices[serial].pipe.start(config)
 
         # grab the intrinsics for the streams:
-        for x in all_streams:
+        for x in self.devices[serial].all_streams:
             vsp = profile.get_stream(x.type).as_video_stream_profile()
             x.intrinsics = vsp.intrinsics
             self.progress("INFO: %s intrinsics: %s" %
@@ -728,31 +817,46 @@ class D4XXToMAVLink(object):
         # Getting the depth sensor's depth scale (see rs-align example
         # for explanation)
         depth_sensor = profile.get_device().first_depth_sensor()
-        self.depth_scale = depth_sensor.get_depth_scale()
-        self.progress("INFO: Depth scale is: %s" % self.depth_scale)
+        self.devices[serial].depth_scale = depth_sensor.get_depth_scale()
+        self.progress("INFO: Depth scale is: %s" %
+                      self.devices[serial].depth_scale)
+
+    def set_obstacle_distance_params(self):
+        for serial in self.devices:
+            for x in self.devices[serial].all_streams:
+                if x.type != rs.stream.depth:
+                    continue
+                self.set_obstacle_distance_params_for_serial(serial,
+                                                             x.intrinsics)
 
     # Setting parameters for the OBSTACLE_DISTANCE message based on
     # actual camera's intrinsics and user-defined params
-    def set_obstacle_distance_params(self, depth_intrinsics):
+    def set_obstacle_distance_params_for_serial(self,
+                                                serial,
+                                                depth_intrinsics):
+        device = self.devices[serial]
+        device.depth_intrinsics = depth_intrinsics
         # For forward facing camera with a horizontal wide view:
         #   HFOV=2*atan[w/(2.fx)],
         #   VFOV=2*atan[h/(2.fy)],
         #   DFOV=2*atan(Diag/2*f),
         #   Diag=sqrt(w^2 + h^2)
         depth_hfov_deg = m.degrees(2 * m.atan(depth_intrinsics.width / (2 * depth_intrinsics.fx)))  # noqa
-        self.depth_vfov_deg = m.degrees(2 * m.atan(depth_intrinsics.height / (2 * depth_intrinsics.fy)))  # noqa
+        self.devices[serial].depth_vfov_deg = m.degrees(2 * m.atan(depth_intrinsics.height / (2 * depth_intrinsics.fy)))  # noqa
         self.progress("INFO: Depth camera HFOV: %0.2f degrees" %
                       depth_hfov_deg)
         self.progress("INFO: Depth camera VFOV: %0.2f degrees" %
-                      self.depth_vfov_deg)
+                      self.devices[serial].depth_vfov_deg)
 
-        angle_offset = (self.camera_facing_angle_degree -
+        camera_config = self.camera_config["cameras"][serial]
+
+        angle_offset = (camera_config["rotation"]*45 -
                         (depth_hfov_deg / 2))
         increment_f = depth_hfov_deg / self.distances_array_length
 
         min_depth_cm = int(self.parameters["DEPTH_MIN"] * 100)
         max_depth_cm = int(self.parameters["DEPTH_MAX"] * 100)
-        self.obstacle_distance = self.conn.mav.obstacle_distance_encode(
+        device.obstacle_distance = self.conn.mav.obstacle_distance_encode(
             0,    # us Timestamp
             mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,   # sensor_type
             self.distances,     # distances,    uint16_t[72],   cm
@@ -764,26 +868,31 @@ class D4XXToMAVLink(object):
             mavutil.mavlink.MAV_FRAME_BODY_FRD   # MAV_FRAME_BODY_FRD
         )
 
-        self.progress("INFO: %s" % str(self.obstacle_distance))
+        if camera_config["rotation"] > mavutil.mavlink.MAV_SENSOR_ROTATION_YAW_315:  # noqa
+            # can't send obstacle distance for anything out-of-plane
+            device.obstacle_distance = None
+
+        self.progress("INFO: %s" % str(device.obstacle_distance))
         self.progress("INFO: OBSTACLE_DISTANCE coverage: from "
                       "%0.3f to %0.3f degrees" %
                       (angle_offset,
                        angle_offset + increment_f *
                        self.distances_array_length))
 
-        self.distance_sensor = self.conn.mav.distance_sensor_encode(
+        device.distance_sensor = self.conn.mav.distance_sensor_encode(
             0,  # ms Timestamp (UNIX time or time since system boot)
             min_depth_cm,   # min_distance, uint16_t, cm
             max_depth_cm,   # min_distance, uint16_t, cm
             0,              # current_distance,	uint16_t, cm
             0,	            # type : 0 (ignored)
             0,              # id : 0 (ignored)
-            int(self.camera_facing_angle_degree / 45),  # orientation
+            camera_config["rotation"],  # orientation
             0               # covariance : 0 (ignored)
         )
-        self.progress("INFO: %s" % str(self.distance_sensor))
+        self.progress("INFO: %s" % str(device.distance_sensor))
 
-        self.obstacle_distance_3d = self.conn.mav.obstacle_distance_3d_encode(
+        mav = self.conn.mav
+        device.obstacle_distance_3d = mav.obstacle_distance_3d_encode(
             0,    # us Timestamp (UNIX time or time since system boot)
             mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,   # sensor_type
             mavutil.mavlink.MAV_FRAME_BODY_FRD,   # MAV_FRAME_BODY_FRD
@@ -794,27 +903,33 @@ class D4XXToMAVLink(object):
             self.parameters["DEPTH_MIN"],
             self.parameters["DEPTH_MAX"]
         )
-        self.progress("INFO: %s" % str(self.obstacle_distance_3d))
+        self.progress("INFO: %s" % str(device.obstacle_distance_3d))
+
+        # set a couple of convenience variables for now:
+        device.DEPTH_WIDTH = depth_intrinsics.width
+        device.DEPTH_HEIGHT = depth_intrinsics.height
 
     # Find height of the horizontal line to calculate the obstacle distances
     #   - Basis: depth camera's vertical FOV, user's input
     #   - Compensation: vehicle's current pitch angle
-    def find_obstacle_line_height(self):
+    def find_obstacle_line_height(self, serial):
+        camera_config = self.camera_config["cameras"][serial]
         # Basic position
-        obstacle_line_height = (self.DEPTH_HEIGHT *
-                                self.obstacle_line_height_ratio)
+        DEPTH_HEIGHT = self.devices[serial].DEPTH_HEIGHT
+        obstacle_line_height = (DEPTH_HEIGHT *
+                                camera_config["obstacle-line-height-ratio"])
 
         # Compensate for the vehicle's pitch angle if data is available
         if (self.vehicle_pitch_rad is not None and
-                self.depth_vfov_deg is not None):
-            delta_height = m.sin(self.vehicle_pitch_rad / 2) / m.sin(m.radians(self.depth_vfov_deg) / 2) * self.DEPTH_HEIGHT  # noqa
+                self.devices[serial].depth_vfov_deg is not None):
+            delta_height = m.sin(self.vehicle_pitch_rad / 2) / m.sin(m.radians(self.devices[serial].depth_vfov_deg) / 2) * DEPTH_HEIGHT  # noqa
             obstacle_line_height += delta_height
 
         # Sanity check
         if obstacle_line_height < 0:
             obstacle_line_height = 0
-        elif obstacle_line_height > self.DEPTH_HEIGHT:
-            obstacle_line_height = self.DEPTH_HEIGHT
+        elif obstacle_line_height > DEPTH_HEIGHT:
+            obstacle_line_height = DEPTH_HEIGHT
 
         return obstacle_line_height
 
@@ -842,6 +957,7 @@ class D4XXToMAVLink(object):
     # @njit Uncomment to optimize for performance. This uses numba
     # which requires llmvlite (see instruction at the top)
     def distances_from_depth_image(self,
+                                   serial,
                                    filtered_frame,
                                    depth_frame,
                                    depth_mat):
@@ -852,7 +968,11 @@ class D4XXToMAVLink(object):
         # Parameters for obstacle distance message
         step = depth_img_width / self.distances_array_length
 
-        obstacle_line_height = self.find_obstacle_line_height()
+        obstacle_line_height = self.find_obstacle_line_height(serial)
+
+        device = self.devices[serial]
+        camera_config = self.camera_config["cameras"][serial]
+        line_thickness = camera_config["obstacle-line-thickness"]
 
         for i in range(self.distances_array_length):
             # Each range (left to right) is found from a set of rows
@@ -866,8 +986,8 @@ class D4XXToMAVLink(object):
             #   ^ One of [distances_array_length] number of columns,
             #   from left to right in the image
             center_pixel = obstacle_line_height
-            upper_pixel = center_pixel + self.obstacle_line_thickness_pixel / 2
-            lower_pixel = center_pixel - self.obstacle_line_thickness_pixel / 2
+            upper_pixel = center_pixel + line_thickness / 2
+            lower_pixel = center_pixel - line_thickness / 2
 
             # Sanity checks
             if upper_pixel > depth_img_height:
@@ -884,7 +1004,7 @@ class D4XXToMAVLink(object):
             # convention.
             # dist_m = depth_mat[int(obstacle_line_height), int(i * step)] * depth_scale  # noqa
             min_point_in_scan = np.min(depth_mat[int(lower_pixel):int(upper_pixel), int(i * step)])  # noqa
-            dist_m = min_point_in_scan * self.depth_scale
+            dist_m = min_point_in_scan * device.depth_scale
 
             # Default value, unless overwritten:
             #   A value of max_distance + 1 (cm) means no obstacle is present.
@@ -897,11 +1017,13 @@ class D4XXToMAVLink(object):
                 self.distances[i] = dist_m * 100
 
             if self.debug_enable:
-                self.display_obstacle_distance_debug(filtered_frame,
+                self.display_obstacle_distance_debug(serial,
+                                                     filtered_frame,
                                                      depth_frame,
                                                      obstacle_line_height)
 
     def display_obstacle_distance_debug(self,
+                                        serial,
                                         filtered_frame,
                                         depth_frame,
                                         obstacle_line_height):
@@ -915,7 +1037,8 @@ class D4XXToMAVLink(object):
         # Draw a horizontal line to visualize the obstacles' line
         x1, y1 = int(0), int(obstacle_line_height)
         x2, y2 = int(self.DEPTH_WIDTH), int(obstacle_line_height)
-        line_thickness = self.obstacle_line_thickness_pixel
+        camera_config = self.camera_config["cameras"][serial]
+        line_thickness = camera_config["obstacle-line-thickness"]
         cv2.line(output_image,
                  (x1, y1),
                  (x2, y2),
@@ -954,11 +1077,14 @@ class D4XXToMAVLink(object):
         self.last_time = time.time()
 
     def populate_obstacle_coordinates_from_depth_image(self,
+                                                       serial,
                                                        color_frame,
                                                        filtered_frame,
                                                        depth_frame,
                                                        depth_mat):
         '''populates self.obstacle_coordinates based on depth_mat'''
+
+        device = self.devices[serial]
 
         # roughly:
         #  - divide image into a 3x3 grid
@@ -1011,7 +1137,7 @@ class D4XXToMAVLink(object):
                     for sx in range(0, grid_partition_x, step_x):
                         x_pixel = x + margin_x + sx
                         point_depth = depth_mat[y_pixel, x_pixel]
-                        point_depth *= self.depth_scale
+                        point_depth *= device.depth_scale
 #                            print("  x=%u margin_x=%u"
 #                                  "sx=%u x_pixel=%u depth %f" %
 #                                  (x, margin_x, sx, x_pixel, point_depth))
@@ -1025,15 +1151,27 @@ class D4XXToMAVLink(object):
                         pixel_depths[r, c, 1] = x_pixel
                         pixel_depths[r, c, 2] = point_depth
 
-        self.obstacle_coordinates = np.ones((9, 3), dtype=np.float) * 9999
+        device.obstacle_coordinates = np.ones((9, 3), dtype=np.float) * 9999
+
+        camera_config = self.camera_config["cameras"][serial]
 
         count = 0
         for r in pixel_depths:
             for c in r:
                 # consider converting pixel coords to obstacle coords:
                 if c[2] < self.parameters["DEPTH_MAX"]:
-                    coordinates = self.pixel_to_xyz(c)
-                    self.obstacle_coordinates[count] = coordinates
+                    coordinates = self.pixel_to_xyz(device, c)
+                    rot = camera_config["rotation"]
+                    if rot != mavutil.mavlink.MAV_SENSOR_ROTATION_NONE:
+                        # rotate coordinates...
+                        v = mavextra.Vector3(coordinates[0],
+                                             coordinates[1],
+                                             coordinates[2])
+                        vr = v.rotate_by_id(rot)
+                        coordinates = (vr.x, vr.y, vr.z)
+#                        self.progress("Rotated (%s) by (%s) to get (%s)" %
+#                                      (str(v), str(rot), str(coordinates)))
+                    device.obstacle_coordinates[count] = coordinates
                 count += 1
 
         if self.debug_obstacle_distance_3d is not None:
@@ -1044,12 +1182,12 @@ class D4XXToMAVLink(object):
                 depth_frame,
                 depth_mat,
                 pixel_depths,
-                self.obstacle_coordinates,
+                device.obstacle_coordinates,
                 rows,
                 columns)
 
-    def pixel_to_xyz(self, depth_pixel):
-        depth_intrinsics = self.stream_def_depth.intrinsics
+    def pixel_to_xyz(self, device, depth_pixel):
+        depth_intrinsics = device.depth_intrinsics
         result = rs.rs2_deproject_pixel_to_point(
             depth_intrinsics,
             [depth_pixel[0], depth_pixel[1]],
@@ -1160,15 +1298,16 @@ class D4XXToMAVLink(object):
                                                   tb=e.__traceback__))
         return ret
 
-    def handle_frames(self, frames):
+    def handle_frames(self, serial, frames):
+        device = self.devices[serial]
         depth_frame = frames.get_depth_frame()
 
         if not depth_frame:
             return
 
         # Store the timestamp for MAVLink messages
-        self.current_time_us = int(round(time.time() * 1000000))
-        self.frame_time = time.time()
+        device.current_time_us = int(round(time.time() * 1000000))
+        device.frame_time = time.time()
 
         # Apply the filters
         filtered_frame = depth_frame
@@ -1183,11 +1322,13 @@ class D4XXToMAVLink(object):
 
         # Create obstacle distance data from depth image
         self.distances_from_depth_image(
+            serial,
             filtered_frame,
             depth_frame,
             depth_mat)
 
         self.populate_obstacle_coordinates_from_depth_image(
+            serial,
             frames.get_color_frame(),
             filtered_frame,
             depth_frame,
@@ -1255,17 +1396,17 @@ class D4XXToMAVLink(object):
         # send_msg_to_gcs('Setting timer...')
         signal.setitimer(signal.ITIMER_REAL, 5)  # seconds...
 
-        self.send_msg_to_gcs('Connecting to camera...')
+        # load our camera definitions:
+        self.load_camera_config()
+
+        # enumerate cameras and configure them:
+        self.enumerate_cameras()
+
         self.realsense_connect()
-        self.send_msg_to_gcs('Camera connected.')
 
         signal.setitimer(signal.ITIMER_REAL, 0)  # cancel alarm
 
-        self.set_obstacle_distance_params(self.stream_def_depth.intrinsics)
-
-        # set a couple of convenience variables for now:
-        self.DEPTH_WIDTH = self.stream_def_depth.intrinsics.width
-        self.DEPTH_HEIGHT = self.stream_def_depth.intrinsics.height
+        self.set_obstacle_distance_params()
 
         # Send MAVlink messages in the background at pre-determined frequencies
         sched = BackgroundScheduler()
@@ -1288,7 +1429,7 @@ class D4XXToMAVLink(object):
                 # we send all of the obstacles in one hit, but to
                 # correct the stream rate we need to call the function
                 # less often:
-                rate /= len(self.obstacle_coordinates)
+                rate /= 9
             if rate == 0:
                 continue
 
@@ -1332,8 +1473,20 @@ class D4XXToMAVLink(object):
                 # get_frame_data(...) and get_frame_timestamp(...) on
                 # a device will return stable values until
                 # wait_for_frames(...) is called
-                frames = self.pipe.wait_for_frames()
-                self.handle_frames(frames)
+                handled_something = False
+                for serial in self.devices.keys():
+                    frames = self.devices[serial].pipe.poll_for_frames()
+                    if frames is not None:
+                        handled_something = True
+                        try:
+                            self.handle_frames(serial, frames)
+                        except RuntimeError as e:
+                            # if we are slow then the frame can
+                            # disappear from under us:
+                            if 'null pointer passed for argument "frame"' not in str(e):  # noqa
+                                raise e
+                if not handled_something:
+                    time.sleep(0.0001)  # avoid a busy-loop
 
         except Exception as e:
             self.progress("Exception caught")
@@ -1346,7 +1499,8 @@ class D4XXToMAVLink(object):
             if glib_loop is not None:
                 glib_loop.quit()
                 glib_thread.join()
-            self.pipe.stop()
+            for serial in self.devices:
+                self.devices[serial].pipe.stop()
             self.conn.mavlink_thread_should_exit = True
             self.mavlink_thread.join()
             self.conn.close()
@@ -1367,6 +1521,12 @@ if __name__ == '__main__':
                         default=None)
     parser.add_argument('--list-cameras',
                         help="List cameras and exit")
+    parser.add_argument('--default-preset-file',
+                        help="preset file to associate with cameras",
+                        default=None)
+    parser.add_argument('--camera-config-filename',
+                        help="camera configuration file",
+                        default="d4xx_to_mavlink.conf")
     parser.add_argument('--baudrate', type=int,
                         help="Vehicle connection baudrate",
                         default=921600)
