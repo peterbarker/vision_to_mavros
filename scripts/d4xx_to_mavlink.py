@@ -1160,6 +1160,45 @@ class D4XXToMAVLink(object):
                                                   tb=e.__traceback__))
         return ret
 
+    def handle_frames(self, frames):
+        depth_frame = frames.get_depth_frame()
+
+        if not depth_frame:
+            return
+
+        # Store the timestamp for MAVLink messages
+        self.current_time_us = int(round(time.time() * 1000000))
+        self.frame_time = time.time()
+
+        # Apply the filters
+        filtered_frame = depth_frame
+        for i in range(len(self.filters)):
+            if self.filters[i][0] is True:
+                filtered_frame = self.filters[i][2].process(
+                    filtered_frame)
+
+        # Extract depth in matrix form
+        depth_data = filtered_frame.as_frame().get_data()
+        depth_mat = np.asanyarray(depth_data)
+
+        # Create obstacle distance data from depth image
+        self.distances_from_depth_image(
+            filtered_frame,
+            depth_frame,
+            depth_mat)
+
+        self.populate_obstacle_coordinates_from_depth_image(
+            frames.get_color_frame(),
+            filtered_frame,
+            depth_frame,
+            depth_mat
+        )
+
+        if self.gstserver is not None:
+            color_frame = frames.get_color_frame()
+            color_image = np.asanyarray(color_frame.get_data())
+            self.gstserver.set_frame(color_image)
+
     def run(self):
         try:
             # Note: 'version' attribute is supported from pyrealsense2
@@ -1294,43 +1333,7 @@ class D4XXToMAVLink(object):
                 # a device will return stable values until
                 # wait_for_frames(...) is called
                 frames = self.pipe.wait_for_frames()
-                depth_frame = frames.get_depth_frame()
-
-                if not depth_frame:
-                    continue
-
-                # Store the timestamp for MAVLink messages
-                self.current_time_us = int(round(time.time() * 1000000))
-                self.frame_time = time.time()
-
-                # Apply the filters
-                filtered_frame = depth_frame
-                for i in range(len(self.filters)):
-                    if self.filters[i][0] is True:
-                        filtered_frame = self.filters[i][2].process(
-                            filtered_frame)
-
-                # Extract depth in matrix form
-                depth_data = filtered_frame.as_frame().get_data()
-                depth_mat = np.asanyarray(depth_data)
-
-                # Create obstacle distance data from depth image
-                self.distances_from_depth_image(
-                    filtered_frame,
-                    depth_frame,
-                    depth_mat)
-
-                self.populate_obstacle_coordinates_from_depth_image(
-                    frames.get_color_frame(),
-                    filtered_frame,
-                    depth_frame,
-                    depth_mat
-                )
-
-                if self.gstserver is not None:
-                    color_frame = frames.get_color_frame()
-                    color_image = np.asanyarray(color_frame.get_data())
-                    self.gstserver.set_frame(color_image)
+                self.handle_frames(frames)
 
         except Exception as e:
             self.progress("Exception caught")
