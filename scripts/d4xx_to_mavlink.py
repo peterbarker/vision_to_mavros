@@ -211,6 +211,7 @@ class D4XXToMAVLink(object):
         self.connection_string = args.connect
         self.connection_baudrate = args.baudrate
         self.debug_enable = args.debug_enable
+        self.debug_test_sliding_block = args.debug_test_sliding_block
 
         self.camera_name = args.camera_name
         self.parameter_file = args.parameter_file
@@ -1323,6 +1324,19 @@ class D4XXToMAVLink(object):
         depth_data = filtered_frame.as_frame().get_data()
         depth_mat = np.asanyarray(depth_data)
 
+        if self.debug_test_sliding_block:
+            (size_y, size_x) = depth_mat.shape
+
+            depth_mat = np.zeros((size_y, size_x), dtype=np.float)
+
+#            for i in range(0, int(size_y / 10)):
+#                for j in range(0, int(size_x / 10)):
+#                    depth_mat[i][j] = 1000.0
+#            for i in range(int(size_y/2)-5, int(size_y/2)+5):
+            for i in range(0, 5):
+                for j in range(0, 5):
+                    depth_mat[i][j] = 1000.0
+
         # Create obstacle distance data from depth image
         self.distances_from_depth_image(
             serial,
@@ -1542,6 +1556,11 @@ if __name__ == '__main__':
                         default=False)
     parser.add_argument('--debug_enable-obstacle-distance-3d', type=bool,
                         help="Enable debugging information",
+                        default=False)
+    parser.add_argument('--debug-test-sliding-block',
+                        type=bool,
+                        help="Replace depth matrix from camera with "
+                        "a box which slides around",
                         default=False)
     parser.add_argument('--camera_name', type=str,
                         help="Camera name to be connected to. If not specified, any valid camera will be connected to randomly. For eg: type 'D435I' to look for Intel RealSense D435I.")  # noqa
