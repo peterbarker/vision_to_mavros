@@ -839,13 +839,9 @@ class D4XXToMAVLink(object):
                                                 depth_intrinsics):
         device = self.devices[serial]
         device.depth_intrinsics = depth_intrinsics
-        # For forward facing camera with a horizontal wide view:
-        #   HFOV=2*atan[w/(2.fx)],
-        #   VFOV=2*atan[h/(2.fy)],
-        #   DFOV=2*atan(Diag/2*f),
-        #   Diag=sqrt(w^2 + h^2)
-        depth_hfov_deg = m.degrees(2 * m.atan(depth_intrinsics.width / (2 * depth_intrinsics.fx)))  # noqa
-        self.devices[serial].depth_vfov_deg = m.degrees(2 * m.atan(depth_intrinsics.height / (2 * depth_intrinsics.fy)))  # noqa
+
+        fov = rs.rs2_fov(device.depth_intrinsics)
+        (depth_hfov_deg, self.devices[serial].depth_vfov_deg) = fov
         self.progress("INFO: Depth camera HFOV: %0.2f degrees" %
                       depth_hfov_deg)
         self.progress("INFO: Depth camera VFOV: %0.2f degrees" %
