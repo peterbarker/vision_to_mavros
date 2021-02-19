@@ -1135,21 +1135,29 @@ class D4XXToMAVLink(object):
         margin_x = int((depth_img_width - columns*grid_partition_x) / 2)
         margin_y = int((depth_img_height - rows*grid_partition_y) / 2)
 
+        debug = False
+        last_time = getattr(self, "last_time", 0)
+        if time.time() - last_time > 10:
+            self.last_time = time.time()
+            debug = False  # change to True to get some debug....
+
         for r in range(rows):
             y = int((r * depth_img_height) / rows)  # grid partition TL y
             for c in range(columns):
                 x = int((c * depth_img_width) / columns)  # grid partition TL x
                 for sy in range(0, grid_partition_y, step_y):
                     y_pixel = y + margin_y + sy
-#                    print("y=%u margin_y=%u sy=%u y_pixel=%u" %
-#                          (y, margin_y, sy, y_pixel))
+                    if debug:
+                        print("y=%u margin_y=%u sy=%u y_pixel=%u" %
+                              (y, margin_y, sy, y_pixel))
                     for sx in range(0, grid_partition_x, step_x):
                         x_pixel = x + margin_x + sx
                         point_depth = depth_mat[y_pixel, x_pixel]
                         point_depth *= device.depth_scale
-#                            print("  x=%u margin_x=%u"
-#                                  "sx=%u x_pixel=%u depth %f" %
-#                                  (x, margin_x, sx, x_pixel, point_depth))
+                        if debug:
+                            print("  x=%u margin_x=%u "
+                                  "sx=%u x_pixel=%u depth %f" %
+                                  (x, margin_x, sx, x_pixel, point_depth))
                         if point_depth < self.parameters["DEPTH_MIN"]:
                             # too close - ignore
                             continue
@@ -1159,6 +1167,11 @@ class D4XXToMAVLink(object):
                         pixel_depths[r, c, 0] = y_pixel
                         pixel_depths[r, c, 1] = x_pixel
                         pixel_depths[r, c, 2] = point_depth
+
+        if debug:
+            print("depth_image_width=%u" % depth_img_width)
+            print("depth_image_height=%u" % depth_img_height)
+            print("pixel_depths: %s" % str(pixel_depths))
 
         # move our pixel depths into a frame suitable for comparing
         # against the intrinsics.  If we've applied a decimation
@@ -1180,7 +1193,12 @@ class D4XXToMAVLink(object):
             for c in r:
                 # consider converting pixel coords to obstacle coords:
                 if c[2] < self.parameters["DEPTH_MAX"]:
-                    coordinates = self.pixel_to_frd(device, c)
+                    coordinates = self.pixel_to_frd(device, c, debug=debug)
+                    if debug:
+                        print("intrinics: %s" % repr(device.depth_intrinsics))
+                        print("fov: %s" % rs.rs2_fov(device.depth_intrinsics))
+                        print("c=%s frd=(%s)" % (str(c),
+                                                 coordinates,))
                     rot = camera_config["rotation"]
                     if rot != mavutil.mavlink.MAV_SENSOR_ROTATION_NONE:
                         # rotate coordinates...
@@ -1206,7 +1224,7 @@ class D4XXToMAVLink(object):
                 rows,
                 columns)
 
-    def pixel_to_frd(self, device, depth_pixel):
+    def pixel_to_frd(self, device, depth_pixel, debug=False):
         depth_intrinsics = device.depth_intrinsics
         result = rs.rs2_deproject_pixel_to_point(
             depth_intrinsics,
@@ -1218,6 +1236,9 @@ class D4XXToMAVLink(object):
             depth_intrinsics,
             center_pixel,
             depth_pixel[2])
+
+        if debug:
+            print("result_center=%s" % str(result_center))
 
         return (
             result[2],
@@ -1345,13 +1366,20 @@ class D4XXToMAVLink(object):
 
             depth_mat = np.zeros((size_y, size_x), dtype=np.float)
 
+            # top-left:
 #            for i in range(0, int(size_y / 10)):
 #                for j in range(0, int(size_x / 10)):
 #                    depth_mat[i][j] = 1000.0
-#            for i in range(int(size_y/2)-5, int(size_y/2)+5):
-            for i in range(0, 5):
+
+            # aligned-left middle
+            for i in range(int(size_y/2)-5, int(size_y/2)+5):
                 for j in range(0, 5):
                     depth_mat[i][j] = 1000.0
+
+            # aligned-right middle
+#            for i in range(int(size_y/2)-5, int(size_y/2)+5):
+#                for j in range(size_x-5, size_x):
+#                    depth_mat[i][j] = 1000.0
 
         # Create obstacle distance data from depth image
         self.distances_from_depth_image(
