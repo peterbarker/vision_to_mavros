@@ -210,9 +210,6 @@ class D4XXToMAVLink(object):
 
         self.connection_string = args.connect
         self.connection_baudrate = args.baudrate
-        if args.obstacle_distance_msg_hz is not None:
-            value = float(args.obstacle_distance_msg_hz)
-            self.parameters["SR_OBS_DIS"] = value
         self.debug_enable = args.debug_enable
 
         self.camera_name = args.camera_name
@@ -230,6 +227,10 @@ class D4XXToMAVLink(object):
             "RTSP_PORT_COL": 8554,  # stream colour image port
         }
         self.load_parameters()
+
+        if args.obstacle_distance_msg_hz is not None:
+            value = float(args.obstacle_distance_msg_hz)
+            self.parameters["SR_OBS_DIS"] = value
 
         # load camera configuration
         self.camera_config = {}
