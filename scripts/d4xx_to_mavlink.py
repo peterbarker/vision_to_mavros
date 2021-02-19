@@ -1164,7 +1164,7 @@ class D4XXToMAVLink(object):
             for c in r:
                 # consider converting pixel coords to obstacle coords:
                 if c[2] < self.parameters["DEPTH_MAX"]:
-                    coordinates = self.pixel_to_xyz(device, c)
+                    coordinates = self.pixel_to_frd(device, c)
                     rot = camera_config["rotation"]
                     if rot != mavutil.mavlink.MAV_SENSOR_ROTATION_NONE:
                         # rotate coordinates...
@@ -1190,7 +1190,7 @@ class D4XXToMAVLink(object):
                 rows,
                 columns)
 
-    def pixel_to_xyz(self, device, depth_pixel):
+    def pixel_to_frd(self, device, depth_pixel):
         depth_intrinsics = device.depth_intrinsics
         result = rs.rs2_deproject_pixel_to_point(
             depth_intrinsics,
