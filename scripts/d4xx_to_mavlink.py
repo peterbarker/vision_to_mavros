@@ -256,15 +256,24 @@ class D4XXToMAVLink(object):
         # List of filters to be applied, in this order.
         # https://github.com/IntelRealSense/librealsense/blob/master/doc/post-processing-filters.md
 
-        self.filters = [
-            [True,  "Decimation Filter",   rs.decimation_filter()],
+        self.use_decimation_filter = True
+
+        self.filters = []
+        if self.use_decimation_filter:
+            self.filters.append([
+                True,
+                "Decimation Filter",
+                rs.decimation_filter()
+            ],)
+
+        self.filters.extend([
             [True,  "Threshold Filter",    rs.threshold_filter()],
             [True,  "Depth to Disparity",  rs.disparity_transform(True)],
             [True,  "Spatial Filter",      rs.spatial_filter()],
             [True,  "Temporal Filter",     rs.temporal_filter()],
             [False, "Hole Filling Filter", rs.hole_filling_filter()],
             [True,  "Disparity to Depth",  rs.disparity_transform(False)]
-        ]
+        ])
 
         # The filters can be tuned with opencv_depth_filtering.py
         # script, and save the default values to here Individual
@@ -1150,6 +1159,17 @@ class D4XXToMAVLink(object):
                         pixel_depths[r, c, 0] = y_pixel
                         pixel_depths[r, c, 1] = x_pixel
                         pixel_depths[r, c, 2] = point_depth
+
+        # move our pixel depths into a frame suitable for comparing
+        # against the intrinsics.  If we've applied a decimation
+        # filter then we'll need to scale the pixel coordinates.
+        if self.use_decimation_filter:
+            scale_x = (device.depth_intrinsics.width/depth_img_width)
+            scale_y = (device.depth_intrinsics.height/depth_img_height)
+            for r in pixel_depths:
+                for c in r:
+                    c[0] *= scale_y
+                    c[1] *= scale_x
 
         device.obstacle_coordinates = np.ones((9, 3), dtype=np.float) * 9999
 
