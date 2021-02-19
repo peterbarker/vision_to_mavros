@@ -1231,7 +1231,7 @@ class D4XXToMAVLink(object):
             [depth_pixel[0], depth_pixel[1]],
             depth_pixel[2])
 
-        center_pixel = [depth_intrinsics.ppy/2, depth_intrinsics.ppx/2]
+        center_pixel = [depth_intrinsics.ppy, depth_intrinsics.ppx]
         result_center = rs.rs2_deproject_pixel_to_point(
             depth_intrinsics,
             center_pixel,
