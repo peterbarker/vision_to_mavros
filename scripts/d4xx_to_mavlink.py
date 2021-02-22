@@ -531,6 +531,7 @@ class D4XXToMAVLink(object):
     camera configuration
     '''
     def load_camera_config(self):
+        self.progress("INFO: Loading camera configuration")
         if self.camera_config_filename is None:
             self.progress("No name")
             return
@@ -729,6 +730,7 @@ class D4XXToMAVLink(object):
         )
 
     def enumerate_cameras(self):
+        self.progress("INFO: Enumerating cameras")
         config_changes_made = False
         self.devices = {}
         for dev in rs.context().query_devices():
@@ -769,6 +771,7 @@ class D4XXToMAVLink(object):
             self.persist_camera_config()
 
     def realsense_connect(self):
+        self.progress("INFO: Connecting to cameras")
         for serial in self.devices.keys():
             self.send_msg_to_gcs('Connecting to camera (%s)...' % serial)
             self.realsense_connect_device(serial)
