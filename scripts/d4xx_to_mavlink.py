@@ -805,13 +805,14 @@ class D4XXToMAVLink(object):
         ]
         if (self.parameters["RTSP_PORT_COL"] > 0 or
                 self.debug_obstacle_distance_3d is not None):
-            self.devices[serial].all_streams.append(D4XXToMAVLink.StreamDef(
+            self.stream_def_color = D4XXToMAVLink.StreamDef(
                 rs.stream.color,
                 rs.format.bgr8,
                 640,
                 480,
                 30,
-            ))
+            )
+            self.devices[serial].all_streams.append(self.stream_def_color)
 
         for stream in self.devices[serial].all_streams:
             self.enable_stream_in_config(config, stream)
@@ -1310,7 +1311,7 @@ class D4XXToMAVLink(object):
                      fps,
                      **properties):
             super(D4XXToMAVLink.GstServer, self).__init__(**properties)
-            self.set_service(port)
+            self.set_service(str(port))
             self.factory = D4XXToMAVLink.SensorFactory(width, height, fps)
             self.factory.set_shared(True)
             self.get_mount_points().add_factory(mount_point, self.factory)
@@ -1509,11 +1510,11 @@ class D4XXToMAVLink(object):
         self.gstserver = None
         if self.parameters["RTSP_PORT_COL"] > 0:
             self.send_msg_to_gcs('RTSP at rtsp://' + self.get_local_ip() +
-                                 ':' + self.parameters["RTSP_PORT_COL"] +
+                                 ':' + str(self.parameters["RTSP_PORT_COL"]) +
                                  self.RTSP_MOUNT_POINT)
             Gst.init(None)
             self.gstserver = D4XXToMAVLink.GstServer(
-                self.parameters["RTSP_PORT_COL"],
+                int(self.parameters["RTSP_PORT_COL"]),
                 self.RTSP_MOUNT_POINT,
                 self.stream_def_color.intrinsics.width,
                 self.stream_def_color.intrinsics.height,
